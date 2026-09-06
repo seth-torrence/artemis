@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Team memory bank CLI for the Artemis agent harness.
 
-The repo is the source of truth: one memory per markdown file under memories/,
-reviewed via git. This CLI validates memories and syncs them one-way into
+The repo is the source of truth: one memory per markdown file under memories/
+(or, in the `projects` layout, under projects/<org>/<project>/memories/ beside
+that project's plans and decisions), reviewed via git. This CLI validates memories and syncs them one-way into
 Artemis profile memory directories inside clearly marked, reversible blocks.
 
 Stdlib only. See README.md for the full design.
@@ -21,7 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 # Path.unlink(missing_ok=...) is the newest thing used here. Checked at runtime
 # rather than assumed: the failure without this is a TypeError deep in promote,
@@ -141,13 +142,58 @@ def save_config(config):
     return path
 
 
-def is_bank(path):
-    """A directory is a bank when it holds `memories/`. The same test
-    `repo_root` has always applied, named so `setup` can ask it too."""
-    return path is not None and (Path(path) / "memories").is_dir()
-
-
 BANK_CONFIG_NAME = "cerebro.json"
+BANK_LAYOUTS = ("flat", "projects")
+
+
+def bank_layout(path):
+    """How the bank arranges its files.
+
+    `flat` (the default, and what every bank was before 0.8.0) keeps every
+    memory under memories/. `projects` nests memories inside the project they
+    belong to — projects/<org>/<project>/memories/<name>.md — beside that
+    project's PROJECT.md, plans and decisions, so one folder answers "where do
+    I look" for a project. Declared by `layout` in cerebro.json; anything
+    unrecognised reads as flat, so an old bank never changes shape under a
+    newer CLI and a newer bank fails closed under an older one."""
+    try:
+        raw = json.loads((Path(path) / BANK_CONFIG_NAME).read_text(encoding="utf-8-sig"))
+        layout = raw.get("layout") if isinstance(raw, dict) else None
+    except (OSError, ValueError):
+        layout = None
+    return layout if layout in BANK_LAYOUTS else "flat"
+
+
+def is_bank(path):
+    """A directory is a bank when it holds `memories/`, or declares the
+    projects layout and holds `projects/`. The same test `repo_root` has
+    always applied, named so `setup` can ask it too."""
+    if path is None:
+        return False
+    path = Path(path)
+    if (path / "memories").is_dir():
+        return True
+    return bank_layout(path) == "projects" and (path / "projects").is_dir()
+
+
+def memory_files(repo):
+    """Every memory file the bank owns, in path order.
+
+    A flat bank reads memories/ recursively (memories/<org>/<project>/ has
+    always been allowed there). A projects bank reads only each project's
+    memories/ folder, so a note, a plan or a decision record sitting beside
+    it is never mistaken for a memory."""
+    repo = Path(repo)
+    if bank_layout(repo) == "projects":
+        return sorted(repo.glob("projects/*/*/memories/**/*.md"))
+    return sorted((repo / "memories").rglob("*.md"))
+
+
+def layout_hint(repo):
+    """Where memories land, in words — for prompts and error messages."""
+    if bank_layout(repo) == "projects":
+        return "projects/<org>/<project>/memories/"
+    return "memories/<org>/<project>/"
 
 
 def load_bank_config(repo):
@@ -313,24 +359,25 @@ def repo_root():
             if bank["slug"] == ref:
                 path = Path(bank["path"]).expanduser()
                 if not is_bank(path):
-                    fail(f"configured bank {ref!r} points at {path}, which has no memories/ directory")
+                    fail(f"configured bank {ref!r} points at {path}, which is not a memory bank "
+                         f"(no memories/, and no projects/ with a projects layout)")
                 return path.resolve()
         path = Path(ref).expanduser()
         if not is_bank(path):
-            fail(f"$CEREBRO_BANK points at {path}, which has no memories/ directory")
+            fail(f"$CEREBRO_BANK points at {path}, which is not a memory bank")
         return path.resolve()
 
     chosen = default_bank(load_banks())
     if chosen is not None:
         path = Path(chosen["path"]).expanduser()
         if not is_bank(path):
-            fail(f"{config_path()} points at {path}, which has no memories/ directory "
+            fail(f"{config_path()} points at {path}, which is not a memory bank "
                  "(run `cerebro setup` to change it)")
         return path.resolve()
 
     here = Path(__file__).resolve().parent.parent
     if not is_bank(here):
-        fail(f"cannot locate repo root (no memories/ next to {here}) — run `cerebro setup`")
+        fail(f"cannot locate repo root ({here} is not a memory bank) — run `cerebro setup`")
     return here
 
 
@@ -512,13 +559,25 @@ def check_memory(mem):
 
 
 def classify_bank_path(repo, path):
-    """(org, project) from a memory's position under memories/.
+    """(org, project) from a memory's position.
 
-    Flat files are the classic unfiled bank. One directory deep is an org with
-    no project; two or more is org/project, with deeper levels folding into
-    the project name so a stray extra directory cannot hide a memory."""
+    Projects layout: projects/<org>/<project>/memories/... — the two folder
+    names are the answer, and a file anywhere else is nobody's. Flat layout:
+    position under memories/ — flat files are the classic unfiled bank, one
+    directory deep is an org with no project; two or more is org/project,
+    with deeper levels folding into the project name so a stray extra
+    directory cannot hide a memory."""
+    repo = Path(repo)
+    if bank_layout(repo) == "projects":
+        try:
+            parts = Path(path).resolve().relative_to((repo / "projects").resolve()).parts
+        except (OSError, ValueError):
+            return None, None
+        if len(parts) >= 4 and parts[2] == "memories":
+            return parts[0], parts[1]
+        return None, None
     try:
-        parts = Path(path).resolve().relative_to((Path(repo) / "memories").resolve()).parts[:-1]
+        parts = Path(path).resolve().relative_to((repo / "memories").resolve()).parts[:-1]
     except (OSError, ValueError):
         return None, None
     if not parts:
@@ -532,7 +591,8 @@ def load_bank(repo, paths=None):
     # rglob, not glob: the bank's own tree may nest memories/<org>/<project>/.
     # Names stay globally unique across the whole tree — installs flatten to
     # <name>.md, so two orgs sharing a slug would silently overwrite each other.
-    files = sorted(paths or (repo / "memories").rglob("*.md"))
+    files = sorted(paths or memory_files(repo))
+    nested = bank_layout(repo) == "projects"
     results, seen = [], {}
     for f in files:
         mem, perrors = parse_memory(Path(f))
@@ -541,6 +601,14 @@ def load_bank(repo, paths=None):
         if mem is not None:
             mem.org, mem.project = classify_bank_path(repo, f)
             mem.tree = "memories"
+            if nested:
+                # The folder is the truth; a frontmatter that disagrees is a
+                # file that was moved without being re-filed, or vice versa.
+                for key, have in (("org", mem.org), ("project", mem.project)):
+                    said = mem.metadata.get(key)
+                    if said and have and str(said) != have:
+                        errors.append(f"frontmatter {key}: {said!r} but the file sits under "
+                                      f"{have!r} — move the file or fix the key")
         if mem and mem.name:
             if mem.name in seen:
                 errors.append(f"duplicate name {mem.name!r} (also in {seen[mem.name].name})")
@@ -571,7 +639,7 @@ def load_mirror_trees(repo):
         if not isinstance(tree, dict):
             continue
         root = tree.get("path")
-        if not isinstance(root, str) or not root or ".." in root or root == "memories":
+        if not isinstance(root, str) or not root or ".." in root or root in ("memories", "projects"):
             continue
         base = repo / root
         if not base.is_dir():
@@ -597,18 +665,27 @@ def load_mirror_trees(repo):
 
 
 def find_memory_file(root, name):
-    """The existing file for a slug anywhere under memories/, or None. Names
-    are globally unique (load_bank enforces it), so the first hit is the one."""
-    hits = sorted((Path(root) / "memories").rglob(f"{name}.md"))
+    """The existing file for a slug anywhere in the bank, or None. Names are
+    globally unique (load_bank enforces it), so the first hit is the one."""
+    hits = [f for f in memory_files(root) if f.stem == name]
     return hits[0] if hits else None
 
 
 def memory_dest(root, mem):
-    """Where a memory lands: memories/<org>/<project>/ when its metadata files
-    it, else the flat classic path. Only slug-shaped parts make a directory —
+    """Where a memory lands.
+
+    Projects layout: projects/<org>/<project>/memories/<name>.md, and both
+    parts are required — a memory that names no project has no home there.
+    Flat layout: memories/<org>/<project>/ when its metadata files it, else
+    the flat classic path. Only slug-shaped parts make a directory —
     anything else quietly stays flat rather than writing a strange path."""
     org = mem.metadata.get("org")
     project = mem.metadata.get("project")
+    if bank_layout(root) == "projects":
+        if not (org and project and SLUG_RE.fullmatch(str(org)) and SLUG_RE.fullmatch(str(project))):
+            fail(f"{mem.name}: this bank files memories by project — pass --org and --project "
+                 f"(the projects are listed in INDEX.md)")
+        return Path(root).joinpath("projects", str(org), str(project), "memories", f"{mem.name}.md")
     parts = [str(p) for p in (org, project) if p and SLUG_RE.fullmatch(str(p))]
     return Path(root).joinpath("memories", *parts, f"{mem.name}.md")
 
@@ -787,8 +864,10 @@ def profile_block(repo, stamp, entry):
         org_bullet = (
             "\n- File what you draft by organization and project: pass --org and --project"
             f" (orgs in use: {', '.join(org_names)}; default org:"
-            f" {config.get('default_org') or org_names[0]}; default project: the current repo's"
-            " name). Memories land under memories/<org>/<project>/.")
+            f" {config.get('default_org') or org_names[0]}; default project: "
+            + ("none — name an existing project from INDEX.md"
+               if bank_layout(repo) == "projects" else "the current repo's name")
+            + f"). Memories land under {layout_hint(repo)}.")
     flag = "" if slug == LEGACY_SLUG else f" --bank {slug}"
     title = ("Team memory bank (agent-maintained)" if slug == LEGACY_SLUG
              else f"Memory bank `{slug}` (agent-maintained)")
@@ -1280,7 +1359,7 @@ def cmd_enable(args):
         for entry in targets:
             repo = Path(entry["path"]).expanduser()
             if not is_bank(repo):
-                print(f"warn  {entry['slug']}: {repo} has no memories/ — skipped", file=sys.stderr)
+                print(f"warn  {entry['slug']}: {repo} is not a memory bank — skipped", file=sys.stderr)
                 continue
             do_enable(profile, repo.resolve(), source_stamp(repo), entry, active, anchor_repo)
         print(f"enabled for profile {profile['dir'].name} "
@@ -1880,7 +1959,7 @@ def check_destination(path):
     """
     Pre-clone: is the destination usable? Post-clone: is it a bank?
 
-    A bank is a directory holding `memories/`, which is the same test
+    A bank is a directory holding `memories/` (or `projects/` with a projects layout), which is the same test
     `repo_root` applies. It used to be "a directory holding `bin/cerebro`" —
     that is, *this* repo — which was true while the only bank was the shared
     one and became wrong the moment a machine could point somewhere else. A
@@ -1890,7 +1969,7 @@ def check_destination(path):
         return _check("repo", "Bank checkout", "ok", str(path))
     if path.exists():
         return _check("repo", "Bank checkout", "fail",
-                      f"{path} exists but has no memories/ directory",
+                      f"{path} exists but is not a memory bank (no memories/, no projects layout)",
                       "Run `cerebro setup --path <dir>` to make one, or point --bank at an existing bank")
     parent = path.parent
     if not os.access(parent, os.W_OK):
@@ -1962,8 +2041,21 @@ def apply_grouping(repo, metadata, args):
     dot in it, say) is simply dropped: nobody typed it, so nobody should have
     to answer for it, and the memory files under the org alone."""
     config = load_bank_config(repo)
+    nested = bank_layout(repo) == "projects"
     org = getattr(args, "org", None) or config.get("default_org")
-    project = getattr(args, "project", None) or norm(self_project(repo).name) or None
+    project = getattr(args, "project", None)
+    if project is None and not nested:
+        project = norm(self_project(repo).name) or None
+    if nested:
+        # A nested bank has no "unfiled" corner: the folder IS the filing, so
+        # the draft must name a project that exists. Guessing from the cwd
+        # would mint a project nobody asked for.
+        if not org or not project:
+            fail("this bank files memories by project — pass --org and --project "
+                 "(the projects are listed in INDEX.md)")
+        if not (Path(repo) / "projects" / str(org) / str(project)).is_dir():
+            fail(f"no project {org}/{project} in this bank — pick one from INDEX.md, or create "
+                 f"projects/{org}/{project}/PROJECT.md first")
     if not org:
         return
     if not SLUG_RE.fullmatch(str(org)):
@@ -2065,7 +2157,7 @@ def land_via_pr(repo, msg, branch_slug, mutate, auto_merge=True):
             print("cerebro: worktree failed; change not landed")
             return False
         mutate(wt)
-        run_git(wt, "add", "-A", "memories")
+        run_git(wt, "add", "-A", "projects" if bank_layout(repo) == "projects" else "memories")
         if run_git(wt, "commit", "-m", msg) is None:
             print("cerebro: commit failed; change not landed")
             return False
@@ -2138,10 +2230,11 @@ def do_promote(repo, quiet=False, auto_merge=True):
     else:
         for m in good:
             place(repo, m)
-        run_git(repo, "add", "-A", "--", "memories")
-        ok = run_git(repo, "commit", "-m", msg, "--", "memories") is not None
+        tree = "projects" if bank_layout(repo) == "projects" else "memories"
+        run_git(repo, "add", "-A", "--", tree)
+        ok = run_git(repo, "commit", "-m", msg, "--", tree) is not None
         if not ok:
-            print("cerebro: promote commit failed — files staged in memories/, resolve manually")
+            print(f"cerebro: promote commit failed — files staged in {tree}/, resolve manually")
     if ok:
         for m in good:
             (inbox / f"{m.name}.md").unlink(missing_ok=True)
@@ -2230,7 +2323,7 @@ def cmd_sync(args):
         repo = Path(entry["path"]).expanduser()
         if not is_bank(repo):
             if not args.quiet:
-                print(f"warn  {entry['slug']}: {repo} has no memories/ — skipped", file=sys.stderr)
+                print(f"warn  {entry['slug']}: {repo} is not a memory bank — skipped", file=sys.stderr)
             continue
         sync_bank(repo.resolve(), entry, args, anchor_repo)
 
@@ -2243,7 +2336,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("validate", help="validate memories (schema, secrets, injection)")
-    p.add_argument("paths", nargs="*", help="specific files (default: memories/*.md)")
+    p.add_argument("paths", nargs="*", help="specific files (default: every memory in the bank)")
     p.add_argument("--strict", action="store_true", help="treat warnings as errors")
     p.set_defaults(fn=cmd_validate)
 
