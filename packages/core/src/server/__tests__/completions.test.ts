@@ -153,17 +153,98 @@ describe('a turn', () => {
     expect(done.result.text).toBe('Summary.');
   });
 
-  it('never puts thinking into the answer', async () => {
+  it('never puts thinking into the answer, and carries it on its own channel', async () => {
     // A caller reading `content` must not receive the model's private
-    // reasoning as though it were the reply.
+    // reasoning as though it were the reply — and a caller that wants to
+    // watch the model think has to be able to, or a served turn shows an
+    // answer with nothing behind it.
     const source = fakeRuns([
-      { type: 'thinking.delta', text: 'Let me consider…' },
+      { type: 'thinking.delta', text: 'Let me ' },
+      { type: 'thinking.delta', text: 'consider…' },
       { type: 'text.delta', text: 'Done.' },
       { type: 'run.end', reason: 'completed' },
     ] as Partial<AgentEvent>[]);
 
-    const done = (await drain(source)).at(-1) as { result: { text: string } };
+    const events = await drain(source);
+    expect(events.filter((e) => e.kind === 'thinking').map((e) => (e as { text: string }).text)).toEqual(
+      ['Let me ', 'consider…'],
+    );
+    const done = events.at(-1) as { result: { text: string; thinking?: string } };
     expect(done.result.text).toBe('Done.');
+    expect(done.result.thinking).toBe('Let me consider…');
+  });
+
+  it('sets one reasoning block off from the next with a paragraph break', async () => {
+    // Two blocks either side of a tool call. The wire carries fragments, not
+    // blocks, so the boundary has to be spelled out or the two arrive glued.
+    const source = fakeRuns([
+      { type: 'thinking.delta', messageId: 'm1', blockIndex: 0, text: 'First, look.' },
+      { type: 'tool.start', name: 'Read', toolCallId: 't1', input: { file_path: '/w/a.ts' } },
+      { type: 'thinking.delta', messageId: 'm2', blockIndex: 0, text: 'Now the ' },
+      { type: 'thinking.delta', messageId: 'm2', blockIndex: 0, text: 'other file.' },
+      { type: 'text.delta', text: 'Done.' },
+      { type: 'run.end', reason: 'completed' },
+    ] as Partial<AgentEvent>[]);
+
+    const events = await drain(source);
+    expect(events.filter((e) => e.kind === 'thinking').map((e) => (e as { text: string }).text)).toEqual(
+      ['First, look.', '\n\nNow the ', 'other file.'],
+    );
+    const done = events.at(-1) as { result: { thinking?: string } };
+    expect(done.result.thinking).toBe('First, look.\n\nNow the other file.');
+  });
+
+  it('forwards no thinking the provider withheld, and none it never had', async () => {
+    // A redacted block is a signature with no plaintext, and an empty delta is
+    // not a delivery: neither has anything a client could draw, and a
+    // `reasoning_content` of "" would still open a fold that never fills.
+    const source = fakeRuns([
+      { type: 'thinking.delta', text: '', redacted: true },
+      { type: 'thinking.delta', text: '' },
+      { type: 'text.delta', text: 'Done.' },
+      { type: 'run.end', reason: 'completed' },
+    ] as Partial<AgentEvent>[]);
+
+    const events = await drain(source);
+    expect(events.some((e) => e.kind === 'thinking')).toBe(false);
+    const done = events.at(-1) as { result: { thinking?: string } };
+    expect(done.result.thinking).toBeUndefined();
+  });
+
+  it('leaves a subagent’s words out of the answer', async () => {
+    // A subagent reports to the agent, not to the caller. Relaying its text
+    // handed the caller the findings inline *and then* the agent's account of
+    // them — the same answer twice, in two voices. The call that spawned it is
+    // still reported, as activity.
+    const source = fakeRuns([
+      { type: 'tool.start', name: 'Task', toolCallId: 't1', input: { prompt: 'look around' } },
+      { type: 'thinking.delta', text: 'sub-thought', agentId: 't1' },
+      { type: 'text.delta', text: 'I found three files. ', agentId: 't1' },
+      { type: 'text.complete', role: 'assistant', text: 'I found three files. ', agentId: 't1' },
+      { type: 'text.delta', text: 'There are three files.' },
+      { type: 'run.end', reason: 'completed' },
+    ] as Partial<AgentEvent>[]);
+
+    const events = await drain(source);
+    expect(events.some((e) => e.kind === 'thinking')).toBe(false);
+    const done = events.at(-1) as {
+      result: { text: string; activity: readonly { tool: string }[] };
+    };
+    expect(done.result.text).toBe('There are three files.');
+    expect(done.result.activity.map((entry) => entry.tool)).toEqual(['task']);
+  });
+
+  it('does not read replayed history back as this turn’s answer', async () => {
+    // A resumed conversation replays its stored blocks through the same
+    // event, marked. A previous turn's reply is not this one's.
+    const source = fakeRuns([
+      { type: 'text.complete', role: 'assistant', text: 'Last time I said this.', replay: true },
+      { type: 'text.complete', role: 'assistant', text: 'And now this.' },
+      { type: 'run.end', reason: 'completed' },
+    ] as Partial<AgentEvent>[]);
+
+    const done = (await drain(source)).at(-1) as { result: { text: string } };
+    expect(done.result.text).toBe('And now this.');
   });
 
   it('reports what the agent did, without reporting what it found', async () => {
@@ -804,6 +885,67 @@ describe('POST /v1/chat/completions', () => {
       expect(content).toBe('one two');
       expect(JSON.parse(chunks.at(-2)!).choices[0].finish_reason).toBe('stop');
       expect(chunks.at(-1)).toBe('[DONE]');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('streams reasoning on its own field, never in content', async () => {
+    // The field the reasoning-capable OpenAI-shaped servers use. An OpenAI
+    // client appends nothing from it; an Artemis client draws a thinking row.
+    const source = fakeRuns([
+      { type: 'thinking.delta', text: 'Weighing ' },
+      { type: 'thinking.delta', text: 'it up.' },
+      { type: 'text.delta', text: 'Yes.' },
+      { type: 'run.end', reason: 'completed' },
+    ] as Partial<AgentEvent>[]);
+
+    const { server, url } = await serve(source);
+    try {
+      const response = await post(url, {
+        model: 'work-max/opus',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+      const deltas = (await response.text())
+        .split('\n\n')
+        .filter((line) => line.startsWith('data: '))
+        .map((line) => line.slice(6))
+        .filter((chunk) => chunk !== '[DONE]')
+        .map((chunk) => JSON.parse(chunk).choices[0].delta as Record<string, string>);
+
+      const reasoning = deltas.map((delta) => delta['reasoning_content'] ?? '').join('');
+      const content = deltas.map((delta) => delta['content'] ?? '').join('');
+      expect(reasoning).toBe('Weighing it up.');
+      expect(content).toBe('Yes.');
+      // Never both on one chunk, and never the reasoning inside the answer.
+      expect(deltas.some((delta) => 'reasoning_content' in delta && 'content' in delta)).toBe(false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('puts the reasoning beside the whole answer, when the caller did not stream', async () => {
+    const source = fakeRuns([
+      { type: 'thinking.delta', text: 'Weighing it up.' },
+      { type: 'text.delta', text: 'Yes.' },
+      { type: 'run.end', reason: 'completed' },
+    ] as Partial<AgentEvent>[]);
+
+    const { server, url } = await serve(source);
+    try {
+      const response = await post(url, {
+        model: 'work-max/opus',
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      const body = (await response.json()) as {
+        choices: { message: { content: string; reasoning_content?: string } }[];
+      };
+      expect(body.choices[0]?.message).toEqual({
+        role: 'assistant',
+        content: 'Yes.',
+        reasoning_content: 'Weighing it up.',
+      });
     } finally {
       await server.close();
     }

@@ -289,6 +289,26 @@ function asEndReason(value: string | undefined): RunEndReason | undefined {
  * target — a session the server has never heard of, poisoning every following
  * turn. A late `session.started` renders fine; a fabricated session id does
  * not.
+ *
+ * ## One message, several blocks, and every block names its index
+ *
+ * The wire is one flat stream of fragments — answer text on `content`,
+ * reasoning on `reasoning_content` — with no block structure of its own. This
+ * run rebuilds one: each stretch of reasoning and each stretch of answer is a
+ * block of the single message the turn produces, numbered in the order they
+ * arrived, so a transcript draws them in that order — the thinking that came
+ * *after* the first sentence lands after it rather than being glued onto the
+ * fold above.
+ *
+ * Every `text.complete` carries the `blockIndex` its deltas carried, and that
+ * is a fix rather than tidiness. The transcript keys blocks by (message,
+ * index) and settles every streaming block the moment a tool row lands. The
+ * closing completion used to be sent *after* the activity report and without
+ * an index, so by the time it arrived the block its deltas had built was
+ * already settled, the index-less lookup could not find it, a fresh block was
+ * opened, and the reader saw the whole answer twice — once streamed, once
+ * whole. Now the completion names its block and lands before the report, so
+ * it finalises the block it belongs to, which is what a completion is for.
  */
 class ArtemisRun implements Run {
   readonly runId: RunId;
@@ -441,7 +461,34 @@ class ArtemisRun implements Run {
       const messageId = `${this.runId}-0` as MessageId;
       const decoder = new TextDecoder();
       let buffer = '';
-      let text = '';
+      /*
+       * The block being written, and its number. See the class comment: a
+       * change of kind — reasoning to answer, answer to reasoning — closes the
+       * block and opens the next, and a closing answer block is finalised with
+       * a `text.complete` that names it.
+       */
+      let blockIndex = 0;
+      let blockKind: 'text' | 'thinking' | undefined;
+      let blockText = '';
+      const closeBlock = (): void => {
+        if (blockKind === 'text' && blockText !== '') {
+          this.#emit({
+            type: 'text.complete',
+            messageId,
+            role: 'assistant',
+            blockIndex,
+            text: blockText,
+          } as never);
+        }
+        if (blockKind !== undefined) blockIndex += 1;
+        blockKind = undefined;
+        blockText = '';
+      };
+      const openBlock = (kind: 'text' | 'thinking'): void => {
+        if (blockKind === kind) return;
+        closeBlock();
+        blockKind = kind;
+      };
       let activity: readonly ArtemisActivity[] = [];
       let endReason: string | undefined;
       /*
@@ -479,19 +526,25 @@ class ArtemisRun implements Run {
           if (delta.artemis?.error !== undefined) remoteError = delta.artemis.error;
           if (delta.usage !== undefined) this.#usage = toUsage(delta.usage);
           if (delta.thinking !== undefined) {
+            openBlock('thinking');
             this.#emit({
               type: 'thinking.delta',
               messageId,
-              blockIndex: 0,
+              blockIndex,
               text: delta.thinking,
             } as never);
           }
           if (delta.text !== undefined) {
-            text += delta.text;
-            this.#emit({ type: 'text.delta', messageId, blockIndex: 0, text: delta.text } as never);
+            openBlock('text');
+            blockText += delta.text;
+            this.#emit({ type: 'text.delta', messageId, blockIndex, text: delta.text } as never);
           }
         }
       }
+
+      // The answer is whole before the report of how it was reached: the last
+      // block closes here, with the `text.complete` that finalises it.
+      closeBlock();
 
       /*
        * The activity report, rendered as settled tool rows. It arrives whole
@@ -516,10 +569,6 @@ class ArtemisRun implements Run {
           ...(entry.summary === undefined ? {} : { resultText: entry.summary }),
         } as never);
       });
-
-      if (text !== '') {
-        this.#emit({ type: 'text.complete', messageId, role: 'assistant', text } as never);
-      }
 
       const reason = asEndReason(endReason) ?? 'completed';
       this.#status = 'ended';
