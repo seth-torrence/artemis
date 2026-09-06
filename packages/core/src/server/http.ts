@@ -2614,6 +2614,18 @@ async function* streamTurn(input: {
         continue;
       }
 
+      // The agent's reasoning, on the field the reasoning-capable OpenAI-shaped
+      // servers already use and never on `content`. An OpenAI client that does
+      // not know the field appends nothing; an Artemis client draws a thinking
+      // row from it — which is the whole reason it is here: without it, a
+      // served turn showed its answer and none of the thinking behind it.
+      if (event.kind === 'thinking') {
+        yield sseEvent(
+          chatChunk({ id, model: model.route, created, delta: { reasoning_content: event.text } }),
+        );
+        continue;
+      }
+
       // The run id, first of everything the turn has to say, and on the same
       // empty-delta chunk the session id rides — an OpenAI client appends
       // nothing and moves on. This is the only place a completions caller can

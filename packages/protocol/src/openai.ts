@@ -355,6 +355,12 @@ export interface OpenAiChatChoice {
   readonly message: {
     readonly role: 'assistant';
     readonly content: string | null;
+    /**
+     * The model's reasoning, when the run produced any. See the same field on
+     * {@link OpenAiChatChunkChoice} for why it travels under this name and
+     * never inside `content`.
+     */
+    readonly reasoning_content?: string;
     readonly tool_calls?: readonly OpenAiToolCall[];
   };
   readonly finish_reason: OpenAiFinishReason;
@@ -380,6 +386,19 @@ export interface OpenAiChatChunkChoice {
   readonly delta: {
     readonly role?: 'assistant';
     readonly content?: string;
+    /**
+     * A fragment of the model's reasoning.
+     *
+     * Not an OpenAI field, and deliberately not folded into `content`: a
+     * client reading the answer must never receive the model's private
+     * working-out as though it were the reply. It rides under the name the
+     * reasoning-capable OpenAI-compatible servers already use (`vllm`,
+     * `llama.cpp`, DeepSeek), so a client that knows the field shows the
+     * reasoning and one that does not ignores it, exactly as it ignores the
+     * `artemis` namespace. Only ever the agent's own reasoning — a subagent's
+     * is reported as activity, not relayed.
+     */
+    readonly reasoning_content?: string;
     readonly tool_calls?: readonly unknown[];
   };
   readonly finish_reason: OpenAiFinishReason | null;

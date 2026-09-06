@@ -66,6 +66,35 @@ describe('TranscriptModel', () => {
     expect(item.streaming).toBe(false);
   });
 
+  it('finalises a streamed block by index after a tool row has settled it', () => {
+    /*
+     * The served-turn shape: the answer streams, the activity report lands as
+     * tool rows (each of which settles every streaming block), and only then
+     * does the whole-block completion arrive. Keyed by its index it finds the
+     * block its deltas built. Sent without one — as the Artemis-server adapter
+     * once did — it could not, opened a second block, and the reader saw the
+     * answer twice.
+     */
+    const model = build();
+    for (const event of stream(
+      { type: 'text.delta', messageId: 'm1', blockIndex: 0, text: 'Hel' },
+      { type: 'text.delta', messageId: 'm1', blockIndex: 0, text: 'lo.' },
+      { type: 'tool.start', toolCallId: 'c1', name: 'read', input: {} },
+      { type: 'tool.end', toolCallId: 'c1', status: 'ok' },
+      { type: 'text.complete', messageId: 'm1', role: 'assistant', blockIndex: 0, text: 'Hello.' },
+    )) {
+      model.apply(event);
+    }
+    model.flush();
+
+    const answers = model
+      .getListSnapshot()
+      .map((id) => model.getItem(id))
+      .filter((item): item is AssistantItem => item?.kind === 'assistant');
+    expect(answers).toHaveLength(1);
+    expect(answers[0]).toMatchObject({ id: 'a:m1:0', text: 'Hello.', streaming: false });
+  });
+
   it('merges tool.start and tool.end into a single item', () => {
     const model = build();
     for (const event of stream(

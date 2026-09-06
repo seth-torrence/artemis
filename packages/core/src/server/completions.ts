@@ -337,6 +337,15 @@ function flattenContent(content: OpenAiChatMessage['content']): string {
 /** What a finished turn produced. */
 export interface TurnResult {
   readonly text: string;
+  /**
+   * The agent's reasoning, joined, when the provider reported any.
+   *
+   * Kept apart from {@link text} for the reason the file comment on
+   * `openai.ts` gives: a caller reading the answer must never be handed the
+   * model's working-out as though it were the reply. Absent, not empty, when
+   * there was none — a field that is present says the model reasoned.
+   */
+  readonly thinking?: string;
   readonly finishReason: OpenAiFinishReason;
   readonly endReason: RunEndReason;
   readonly sessionId?: string;
@@ -349,6 +358,19 @@ export interface TurnResult {
 /** One streamed piece of a turn. */
 export type TurnEvent =
   | { readonly kind: 'text'; readonly text: string }
+  | {
+      /**
+       * A fragment of the agent's reasoning, as it thinks.
+       *
+       * Its own kind rather than a flag on `text`, because the two must never
+       * be confused downstream: `text` becomes `content`, which is the answer,
+       * and this becomes `reasoning_content`, which is not. Only the agent's
+       * own — a subagent's reasoning is that subagent's business, reported to
+       * the caller as the activity that spawned it.
+       */
+      readonly kind: 'thinking';
+      readonly text: string;
+    }
   | { readonly kind: 'activity'; readonly activity: ArtemisActivity }
   | {
       /**
@@ -454,6 +476,9 @@ export async function* runTurn(
 
   const activity: ArtemisActivity[] = [];
   let text = '';
+  let thinking = '';
+  /** The reasoning block being relayed, so a new one is set off from the last. */
+  let thinkingBlock: string | undefined;
   /*
    * Seeded from the request when resuming, and that is a fix rather than a
    * convenience.
@@ -567,6 +592,18 @@ export async function* runTurn(
           break;
 
         case 'text.delta':
+          /*
+           * The agent's own words only.
+           *
+           * A subagent's text arrives on the same feed, marked with the id of
+           * the call that spawned it, and it is not the answer: it is a report
+           * to the agent, which reads it and then says what it has to say. The
+           * caller sees the call itself in the activity report. Relaying the
+           * words as well handed a caller every subagent's findings inline
+           * *and then* the agent's account of them — the same answer twice, in
+           * two voices.
+           */
+          if (event.agentId !== undefined) break;
           text += event.text;
           yield { kind: 'text', text: event.text };
           break;
@@ -580,12 +617,42 @@ export async function* runTurn(
            * says which a provider does, but the honest check is whether anything
            * actually arrived — an adapter that claims streaming and sends none
            * would otherwise produce an empty answer.
+           *
+           * Never a replayed block: a resumed conversation reads its history
+           * back through the same event, and a previous turn's answer is not
+           * this turn's. Same rule for a subagent's block as for its deltas.
            */
+          if (event.agentId !== undefined || event.replay === true) break;
           if (event.role === 'assistant' && text.length === 0) {
             text += event.text;
             yield { kind: 'text', text: event.text };
           }
           break;
+
+        case 'thinking.delta': {
+          /*
+           * Forwarded on its own channel, never into `text`.
+           *
+           * A redacted block has nothing to show — the provider kept the
+           * reasoning and sent a signature — and an empty fragment is not a
+           * delivery, so neither crosses the wire. The subagent rule is the
+           * one `text.delta` gives.
+           *
+           * The wire has no blocks, only fragments, so the boundary between
+           * two reasoning blocks — one either side of a tool call, typically —
+           * travels as a paragraph break. Without it the last word of one and
+           * the first of the next arrive glued together, on the stream and in
+           * the whole reply alike.
+           */
+          if (event.agentId !== undefined || event.redacted === true || event.text === '') break;
+          const block = `${event.messageId}:${String(event.blockIndex)}`;
+          const fragment =
+            thinkingBlock === undefined || thinkingBlock === block ? event.text : `\n\n${event.text}`;
+          thinkingBlock = block;
+          thinking += fragment;
+          yield { kind: 'thinking', text: fragment };
+          break;
+        }
 
         case 'tool.start': {
           const entry: ArtemisActivity = {
@@ -661,6 +728,7 @@ export async function* runTurn(
             kind: 'done',
             result: {
               text,
+              ...(thinking.length === 0 ? {} : { thinking }),
               finishReason: finishReasonFor(event.reason),
               endReason: event.reason,
               ...(sessionId === undefined ? {} : { sessionId }),
@@ -678,10 +746,11 @@ export async function* runTurn(
         }
 
         default:
-          // `thinking.delta`, `tool.end`, `background.tasks`. Not silently
-          // dropped by accident — none of them has a place in an OpenAI reply,
-          // and thinking in particular must not be concatenated into `content`,
-          // where a caller would read a model's private reasoning as its answer.
+          // `tool.end`, `background.tasks`, and the rest. Not silently dropped
+          // by accident — none of them has a place in an OpenAI reply. (Thinking
+          // has its own case above, and its own field on the wire, precisely
+          // so it is never concatenated into `content`, where a caller would
+          // read a model's private reasoning as its answer.)
           break;
       }
     }
@@ -785,7 +854,11 @@ export function chatResponse(input: {
     choices: [
       {
         index: 0,
-        message: { role: 'assistant', content: result.text },
+        message: {
+          role: 'assistant',
+          content: result.text,
+          ...(result.thinking === undefined ? {} : { reasoning_content: result.thinking }),
+        },
         finish_reason: result.finishReason,
       },
     ],
@@ -811,7 +884,11 @@ export function chatChunk(input: {
   readonly id: string;
   readonly model: string;
   readonly created: number;
-  readonly delta: { readonly role?: 'assistant'; readonly content?: string };
+  readonly delta: {
+    readonly role?: 'assistant';
+    readonly content?: string;
+    readonly reasoning_content?: string;
+  };
   readonly finishReason?: OpenAiFinishReason;
   readonly usage?: OpenAiUsage;
   readonly artemis?: OpenAiChatChunk['artemis'];

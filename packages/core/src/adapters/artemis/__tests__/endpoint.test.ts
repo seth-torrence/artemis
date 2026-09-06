@@ -162,17 +162,33 @@ describe('a fresh turn', () => {
     expect(types[0]).toBe('session.started');
     expect(events[0]).toMatchObject({ sessionId: 'sess-abc', providerId: 'artemis' });
 
+    // The answer closes before the report of how it was reached lands.
     expect(types).toEqual([
       'session.started',
       'text.delta',
       'text.delta',
-      'tool.start',
-      'tool.end',
-      'tool.start',
-      'tool.end',
       'text.complete',
+      'tool.start',
+      'tool.end',
+      'tool.start',
+      'tool.end',
       'run.end',
     ]);
+
+    // The completion names the block its deltas built. Without the index, a
+    // transcript that had already settled the block under the tool rows could
+    // not find it, opened a second one, and drew the whole answer twice.
+    const deltas = events.filter((event) => event.type === 'text.delta');
+    expect(deltas).toMatchObject([
+      { messageId: 'run-1-0', blockIndex: 0, text: 'Hel' },
+      { messageId: 'run-1-0', blockIndex: 0, text: 'lo.' },
+    ]);
+    expect(events.find((event) => event.type === 'text.complete')).toMatchObject({
+      messageId: 'run-1-0',
+      blockIndex: 0,
+      role: 'assistant',
+      text: 'Hello.',
+    });
 
     const end = events.at(-1);
     expect(end).toMatchObject({
@@ -237,6 +253,70 @@ describe('a fresh turn', () => {
     // the server finally says. What is not tolerated is a made-up id.
     expect(types).toEqual(['text.delta', 'session.started', 'text.complete', 'run.end']);
     expect(events.at(-1)).toMatchObject({ sessionId: 'sess-late' });
+  });
+
+  it('draws reasoning as thinking rows, in the order it arrived', async () => {
+    // The wire carries reasoning on `reasoning_content` — a flat stream beside
+    // the answer's. Each stretch becomes a block of its own, numbered in
+    // arrival order, so reasoning the model did *after* its first sentence
+    // lands after that sentence rather than being glued onto the fold above.
+    const { origin } = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      response.write(sse(chunk({ role: 'assistant' })));
+      response.write(sse(chunk({ reasoning_content: 'First, ' })));
+      response.write(sse(chunk({ reasoning_content: 'look.' })));
+      response.write(sse(chunk({ content: 'Found it. ' })));
+      response.write(sse(chunk({ reasoning_content: 'Now the other file.' })));
+      response.write(sse(chunk({ content: 'Both fixed.' })));
+      response.write(
+        sse(chunk({}, { finish_reason: 'stop', artemis: { sessionId: 'sess-abc', endReason: 'completed' } })),
+      );
+      response.write(sse('[DONE]'));
+      response.end();
+    });
+
+    const events = await drive(origin);
+    const blocks = events
+      .filter((event) => event.type !== 'session.started' && event.type !== 'run.end')
+      .map((event) => {
+        const { type, blockIndex, text } = event as { type: string; blockIndex: number; text: string };
+        return { type, blockIndex, text };
+      });
+
+    expect(blocks).toEqual([
+      { type: 'thinking.delta', blockIndex: 0, text: 'First, ' },
+      { type: 'thinking.delta', blockIndex: 0, text: 'look.' },
+      { type: 'text.delta', blockIndex: 1, text: 'Found it. ' },
+      // The answer block closes the moment the model goes back to thinking,
+      // whole, under the index its delta carried.
+      { type: 'text.complete', blockIndex: 1, text: 'Found it. ' },
+      { type: 'thinking.delta', blockIndex: 2, text: 'Now the other file.' },
+      { type: 'text.delta', blockIndex: 3, text: 'Both fixed.' },
+      { type: 'text.complete', blockIndex: 3, text: 'Both fixed.' },
+    ]);
+    // Every block belongs to the one message the turn is.
+    expect(new Set(events.map((event) => (event as { messageId?: string }).messageId).filter(Boolean)))
+      .toEqual(new Set(['run-1-0']));
+  });
+
+  it('reads reasoning under the other name it travels by', async () => {
+    // `reasoning` is the second spelling in the wild; the local reader takes
+    // both, and so does this one.
+    const { origin } = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      response.write(sse(chunk({ role: 'assistant' })));
+      response.write(sse(chunk({ reasoning: 'hmm' })));
+      response.write(sse(chunk({ content: 'ok' })));
+      response.write(sse(chunk({}, { finish_reason: 'stop', artemis: { endReason: 'completed' } })));
+      response.write(sse('[DONE]'));
+      response.end();
+    });
+
+    const events = await drive(origin);
+    expect(events.find((event) => event.type === 'thinking.delta')).toMatchObject({
+      blockIndex: 0,
+      text: 'hmm',
+    });
   });
 
   it('reports a stream that died mid-turn as an error with no session at all', async () => {
