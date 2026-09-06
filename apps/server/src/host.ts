@@ -125,6 +125,16 @@ export function createHeadlessHost(dataDir: string): HeadlessHost {
   const runs = new RunRegistry({
     resolveAdapter: (id) => providers.get(id),
     resolveRun: async ({ profileId, providerId }) => ({ env: await envFor(profileId, providerId) }),
+    /*
+     * Far above the registry's default of a thousand, because here the tail
+     * is not a courtesy to a window that reloaded: it is what a client that
+     * slept through a served turn is replayed on `GET /api/v0/runs/{id}/stream`.
+     * A turn streams a text delta per token, so a thousand events is a few
+     * minutes of output; a laptop lid is closed for longer than that. Each
+     * event is a small object, and the runs a headless server holds at once
+     * are few, so the memory is cheap next to the reply it saves.
+     */
+    historyLimit: 50_000,
   });
 
   const catalogue = createCatalogue({

@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentEvent, RunHandle, ServerModel } from '@rx-artemis/protocol';
 import { NO_CAPABILITIES } from '@rx-artemis/protocol';
 
-import { promptFromMessages, runTurn, type RunSource } from '../completions.js';
+import { promptFromMessages, resumeTurn, runTurn, type RunSource } from '../completions.js';
 
 const MODEL: ServerModel = {
   route: 'work-max/opus',
@@ -300,7 +300,7 @@ describe('a turn', () => {
     const events = await drain(source);
     const kinds = events.map((event) => event.kind);
     expect(kinds).toEqual(['run', 'session', 'text', 'done']);
-    expect(events[1]).toEqual({ kind: 'session', sessionId: 'sess-9' });
+    expect(events[1]).toMatchObject({ kind: 'session', sessionId: 'sess-9' });
   });
 
   it('does not re-announce a session its caller already named', async () => {
@@ -323,7 +323,7 @@ describe('a turn', () => {
     ] as Partial<AgentEvent>[]);
 
     const events = await drain(source, turn({ extensions: { sessionId: 'sess-9' } }));
-    expect(events[1]).toEqual({ kind: 'session', sessionId: 'sess-fork' });
+    expect(events[1]).toMatchObject({ kind: 'session', sessionId: 'sess-fork' });
   });
 
   it('maps usage into OpenAI’s three numbers', async () => {
@@ -425,7 +425,7 @@ describe('permission requests, with somebody who can answer them', () => {
     // Nothing was answered here: the decision arrives on its own request,
     // routinely after this stream is gone.
     expect(source.denied).toEqual([]);
-    expect(events.find((event) => event.kind === 'permission')).toEqual({
+    expect(events.find((event) => event.kind === 'permission')).toMatchObject({
       kind: 'permission',
       notice: {
         status: 'requested',
@@ -450,7 +450,7 @@ describe('permission requests, with somebody who can answer them', () => {
     ] as Partial<AgentEvent>[]);
 
     const events = await drain(source, turn({ extensions: REMOTE }));
-    expect(events.filter((event) => event.kind === 'permission').at(-1)).toEqual({
+    expect(events.filter((event) => event.kind === 'permission').at(-1)).toMatchObject({
       kind: 'permission',
       notice: {
         status: 'resolved',
@@ -698,6 +698,201 @@ describe('promptFromMessages', () => {
 /* Over a real socket                                                          */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * A run source that remembers what it emitted, so a resume can replay it.
+ *
+ * `runEvents` is the engine's retained tail; `emit` publishes live. The two
+ * paths a resume has to reconcile are exactly these — what was kept and what
+ * arrives — so the fake keeps them separate rather than scripting one list.
+ */
+function retainingRuns(retained: readonly Partial<AgentEvent>[] = []) {
+  const listeners = new Set<(event: AgentEvent) => void>();
+  const events: AgentEvent[] = retained.map(
+    (partial) => ({ runId: 'run-1', ts: 0, ...partial }) as AgentEvent,
+  );
+  const denied: string[] = [];
+  const interrupted: string[] = [];
+  const disposed: string[] = [];
+  const source: RunSource = {
+    startRun: async () => {
+      throw new Error('not started here');
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    interrupt: async (runId) => {
+      interrupted.push(String(runId));
+    },
+    respondToPermission: async (_runId, requestId) => {
+      denied.push(requestId);
+    },
+    disposeRun: async (runId) => {
+      disposed.push(String(runId));
+    },
+    runEvents: async (query) => {
+      const after = query.afterSeq ?? -1;
+      const kept = events.filter((event) => event.runId === query.runId && event.seq > after);
+      const first = kept[0];
+      return { events: kept, truncated: first !== undefined && first.seq > after + 1 };
+    },
+  };
+  const emit = (partial: Partial<AgentEvent>): void => {
+    const event = { runId: 'run-1', ts: 0, ...partial } as AgentEvent;
+    events.push(event);
+    for (const listener of listeners) listener(event);
+  };
+  return Object.assign(source, { emit, denied, interrupted, disposed });
+}
+
+describe('a turn, numbered', () => {
+  it('stamps every piece with the event it came from, and the announcement with nothing', async () => {
+    // The cursor a client resumes from. Pieces from the event stream carry
+    // their event's seq; the run announcement comes from nowhere in it.
+    const source = fakeRuns([
+      { type: 'session.started', sessionId: 'sess-9', seq: 0 },
+      { type: 'thinking.delta', text: 'hm', seq: 1 },
+      { type: 'text.delta', text: 'Hi', seq: 2 },
+      { type: 'run.end', reason: 'completed', seq: 3 },
+    ] as Partial<AgentEvent>[]);
+
+    const events = await drain(source);
+    expect(events.map((event) => [event.kind, event.seq])).toEqual([
+      ['run', undefined],
+      ['session', 0],
+      ['thinking', 1],
+      ['text', 2],
+      ['done', 3],
+    ]);
+  });
+});
+
+describe('picking a run back up', () => {
+  const drainResume = async (
+    source: RunSource,
+    request: Parameters<typeof resumeTurn>[1],
+    onEach?: (kind: string) => void,
+  ) => {
+    const events = [];
+    for await (const event of resumeTurn(source, request)) {
+      events.push(event);
+      onEach?.(event.kind);
+    }
+    return events;
+  };
+
+  it('replays what the client missed, then follows the run live, without repeating anything', async () => {
+    const source = retainingRuns([
+      { type: 'session.started', sessionId: 'sess-9', seq: 0 },
+      { type: 'text.delta', text: 'one ', seq: 1 },
+      { type: 'text.delta', text: 'two ', seq: 2 },
+    ]);
+
+    const events = await drainResume(source, { runId: 'run-1' as never, afterSeq: 1 }, (kind) => {
+      // The moment the replay is consumed the run is still going: two more
+      // events arrive live, one of them a repeat of the last retained event
+      // — a race the subscribe-before-replay ordering makes routine.
+      if (kind === 'text') {
+        queueMicrotask(() => {
+          source.emit({ type: 'text.delta', text: 'two ', seq: 2 });
+          source.emit({ type: 'text.delta', text: 'three', seq: 3 });
+          source.emit({ type: 'run.end', reason: 'completed', seq: 4 });
+        });
+      }
+    });
+
+    expect(events.map((event) => [event.kind, event.seq])).toEqual([
+      ['run', undefined],
+      ['text', 2],
+      ['text', 3],
+      ['done', 4],
+    ]);
+    const done = events.at(-1) as { result: { text: string; sessionId?: string } };
+    // The reply is rebuilt from the whole tail, not only the part replayed:
+    // what the client already had is counted, what it never saw is too.
+    expect(done.result.text).toBe('one two three');
+    expect(done.result.sessionId).toBe('sess-9');
+    expect(source.interrupted).toEqual([]);
+    expect(source.disposed).toEqual([]);
+  });
+
+  it('ends at once when the run already ended while nobody was attached', async () => {
+    const source = retainingRuns([
+      { type: 'text.delta', text: 'all of it', seq: 0 },
+      { type: 'run.end', reason: 'completed', seq: 1 },
+    ]);
+    const events = await drainResume(source, { runId: 'run-1' as never, afterSeq: 0 });
+    expect(events.map((event) => event.kind)).toEqual(['run', 'done']);
+  });
+
+  it('replays from the beginning for a client that had rendered nothing', async () => {
+    const source = retainingRuns([
+      { type: 'text.delta', text: 'a', seq: 0 },
+      { type: 'run.end', reason: 'completed', seq: 1 },
+    ]);
+    const events = await drainResume(source, { runId: 'run-1' as never });
+    expect(events.map((event) => [event.kind, event.seq])).toEqual([
+      ['run', undefined],
+      ['text', 0],
+      ['done', 1],
+    ]);
+  });
+
+  it('says so first when the retained tail no longer reaches the cursor', async () => {
+    // The engine keeps a bounded tail. A cursor older than its head is a hole
+    // the client has to be told about, or it splices two halves of an answer
+    // together as though nothing were missing.
+    const source = retainingRuns([
+      { type: 'text.delta', text: 'late', seq: 7 },
+      { type: 'run.end', reason: 'completed', seq: 8 },
+    ]);
+    const events = await drainResume(source, { runId: 'run-1' as never, afterSeq: 2 });
+    expect(events.map((event) => event.kind)).toEqual(['run', 'gap', 'text', 'done']);
+    expect(events[1]).toMatchObject({ kind: 'gap', afterSeq: 2, firstSeq: 7 });
+  });
+
+  it('never denies a prompt: a question asked into an empty room is what the client came back for', async () => {
+    const source = retainingRuns([
+      {
+        type: 'permission.request',
+        requestId: 'perm-1',
+        request: { id: 'perm-1', toolName: 'Bash', input: { command: 'ls' } },
+        seq: 0,
+      },
+      { type: 'run.end', reason: 'completed', seq: 1 },
+    ]);
+    const events = await drainResume(source, { runId: 'run-1' as never });
+    expect(events[1]).toMatchObject({
+      kind: 'permission',
+      notice: { status: 'requested', request: { id: 'perm-1' } },
+      seq: 0,
+    });
+    expect(source.denied).toEqual([]);
+  });
+
+  it('hands the run back when the client goes again, and never ends it', async () => {
+    const source = retainingRuns([{ type: 'text.delta', text: 'so far', seq: 0 }]);
+    const signal = { aborted: false };
+    const detached: string[] = [];
+
+    const stream = resumeTurn(source, {
+      runId: 'run-1' as never,
+      afterSeq: 0,
+      signal,
+      onDetach: (runId) => detached.push(String(runId)),
+    });
+    expect((await stream.next()).value).toMatchObject({ kind: 'run' });
+    // Nothing more is retained and nothing arrives; the client hangs up.
+    const pending = stream.next();
+    signal.aborted = true;
+    expect((await pending).done).toBe(true);
+
+    expect(detached).toEqual(['run-1']);
+    expect(source.interrupted).toEqual([]);
+    expect(source.disposed).toEqual([]);
+  });
+});
+
 describe('POST /v1/chat/completions', () => {
   const TOKEN = 'completions-token-0123456789abcdef';
   const CONNECTION = {
@@ -724,7 +919,13 @@ describe('POST /v1/chat/completions', () => {
     invalidate: () => undefined,
   };
 
-  async function serve(source: RunSource, extra: { onError?: (error: unknown) => void } = {}) {
+  async function serve(
+    source: RunSource,
+    extra: {
+      onError?: (error: unknown) => void;
+      remoteStream?: { heartbeatMs?: number };
+    } = {},
+  ) {
     const { createArtemisServer } = await import('../http.js');
     const { createWorkspaceResolver } = await import('../workspaces.js');
     const server = createArtemisServer({
@@ -946,6 +1147,151 @@ describe('POST /v1/chat/completions', () => {
         content: 'Yes.',
         reasoning_content: 'Weighing it up.',
       });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('numbers every chunk that came from an event', async () => {
+    const source = fakeRuns([
+      { type: 'text.delta', text: 'one', seq: 0 },
+      { type: 'text.delta', text: 'two', seq: 1 },
+      { type: 'run.end', reason: 'completed', seq: 2 },
+    ] as Partial<AgentEvent>[]);
+
+    const { server, url } = await serve(source);
+    try {
+      const response = await post(url, {
+        model: 'work-max/opus',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+      const chunks = (await response.text())
+        .split('\n\n')
+        .filter((line) => line.startsWith('data: '))
+        .map((line) => line.slice(6))
+        .filter((chunk) => chunk !== '[DONE]')
+        .map((chunk) => JSON.parse(chunk));
+
+      // Role, run announcement, two text chunks, the final chunk.
+      expect(chunks.map((chunk) => chunk.artemis?.seq)).toEqual([undefined, undefined, 0, 1, 2]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('keeps a quiet stream alive with a heartbeat comment', async () => {
+    // An agent inside a long tool call sends nothing for minutes. Without a
+    // heartbeat a client cannot tell that from a dead socket, and an idle
+    // timeout somewhere on the path can make it one.
+    const listeners = new Set<(event: AgentEvent) => void>();
+    const source: RunSource = {
+      ...fakeRuns([]),
+      startRun: async (input) => {
+        setTimeout(() => {
+          for (const listener of listeners) {
+            listener({ runId: 'run-1', seq: 0, ts: 0, type: 'run.end', reason: 'completed' } as AgentEvent);
+          }
+        }, 120);
+        return {
+          runId: 'run-1',
+          providerId: input.providerId,
+          profileId: input.profileId,
+          cwd: input.cwd,
+          status: 'working',
+          capabilities: NO_CAPABILITIES,
+        } as unknown as RunHandle;
+      },
+      subscribe: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+
+    const { server, url } = await serve(source, { remoteStream: { heartbeatMs: 20 } });
+    try {
+      const response = await post(url, {
+        model: 'work-max/opus',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+      const text = await response.text();
+      expect(text.split(':hb\n\n').length).toBeGreaterThan(2);
+      expect(text.trimEnd().endsWith('data: [DONE]')).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('picks the stream back up on GET /api/v0/runs/{id}/stream, after the cursor the client names', async () => {
+    const source = retainingRuns();
+    source.startRun = async (input) => {
+      queueMicrotask(() => {
+        source.emit({ type: 'session.started', sessionId: 'sess-9', seq: 0 });
+        source.emit({ type: 'text.delta', text: 'one ', seq: 1 });
+        source.emit({ type: 'text.delta', text: 'two', seq: 2 });
+        source.emit({ type: 'run.end', reason: 'completed', seq: 3 });
+      });
+      return {
+        runId: 'run-1',
+        providerId: input.providerId,
+        profileId: input.profileId,
+        cwd: input.cwd,
+        status: 'working',
+        capabilities: NO_CAPABILITIES,
+      } as unknown as RunHandle;
+    };
+
+    const { server, url } = await serve(source);
+    const base = url.replace('/v1/chat/completions', '');
+    try {
+      // The original stream claims the run for this connection.
+      const first = await post(url, {
+        model: 'work-max/opus',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        artemis: { remote: { detach: true, permissions: true } },
+      });
+      await first.text();
+
+      const resumed = await fetch(`${base}/api/v0/runs/run-1/stream?after=1`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(resumed.status).toBe(200);
+      expect(resumed.headers.get('content-type')).toContain('text/event-stream');
+      const raw = await resumed.text();
+      const chunks = raw
+        .split('\n\n')
+        .filter((line) => line.startsWith('data: '))
+        .map((line) => line.slice(6));
+      expect(chunks.at(-1)).toBe('[DONE]');
+      const parsed = chunks.slice(0, -1).map((chunk) => JSON.parse(chunk));
+      // The run id first, then only what came after the cursor — and no role
+      // chunk, because the client is appending to a message it already has.
+      expect(parsed.map((chunk) => [chunk.artemis?.runId, chunk.artemis?.seq, chunk.choices[0].delta.content])).toEqual([
+        ['run-1', undefined, undefined],
+        [undefined, 2, 'two'],
+        [undefined, 3, undefined],
+      ]);
+      expect(parsed.at(-1)).toMatchObject({
+        choices: [{ finish_reason: 'stop' }],
+        artemis: { endReason: 'completed', sessionId: 'sess-9', seq: 3 },
+      });
+      // Stamped with the route the run was started on.
+      expect(parsed[0].model).toBe('work-max/opus');
+
+      // A cursor that is not a number is refused, not guessed at.
+      const bad = await fetch(`${base}/api/v0/runs/run-1/stream?after=soon`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(bad.status).toBe(400);
+
+      // A run this connection did not start is not there, in the same words
+      // as one that never existed.
+      const stranger = await fetch(`${base}/api/v0/runs/run-999/stream`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(stranger.status).toBe(404);
     } finally {
       await server.close();
     }

@@ -332,6 +332,27 @@ export interface ArtemisResponseExtensions {
   /** The true reason the run ended, when `finish_reason` had to flatten it. */
   readonly endReason?: string;
   /**
+   * The resume cursor: the sequence number of the run event this chunk was
+   * translated from.
+   *
+   * A stream can die under a client — a laptop sleeps, a tunnel drops — while
+   * the run it was watching goes on, kept alive by `artemis.remote.detach`.
+   * The client that comes back asks `GET /api/v0/runs/{runId}/stream?after=N`
+   * for everything after the last chunk it rendered, and this is the `N`. It
+   * rides on every chunk that came from an event; the run announcement and a
+   * session id learned from the run handle carry none, and a client may meet
+   * those twice without harm. Only on the streaming shape: a whole reply has
+   * nothing to resume.
+   */
+  readonly seq?: number;
+  /**
+   * On a resumed stream: the server no longer holds everything the client
+   * asked for. What follows starts at `firstSeq`; the events between the
+   * client's cursor and it are gone, and a client should say so rather than
+   * splice the halves together.
+   */
+  readonly gap?: { readonly afterSeq: number; readonly firstSeq: number };
+  /**
    * Why the run failed, when {@link endReason} is `error`.
    *
    * The streaming path had no way to say this. A failed turn ended with
