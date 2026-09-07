@@ -1,6 +1,10 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.10.0
+
+**`#123` is a link on every git host.** A pull request named the way people name one — `#134`, `david/cortex#4`, "see PR #98" — linked only when the working directory's `origin` was on github.com; on a Forgejo, Gitea, GitLab or Bitbucket checkout, or any self-hosted server, it stayed dead text. The `origin` remote is read on any host now, in all three spellings git uses for it, and the link is spelled the way that host spells a pull request: `/pull/` on GitHub, `/-/merge_requests/` on GitLab, `/pull-requests/` on Bitbucket, and `/pulls/` on Gitea, Forgejo and any server whose name says nothing about what it runs. A server that does not say can be told: `[artemis] forge = gitlab` in the repository's `.git/config` settles it. `owner/repo#12` on a self-hosted checkout names the neighbouring repository there; with no checkout to say otherwise it still means github.com, as it always has.
+
 ## What's new in 2.9.0
 
 **A parked request is answered above the prompt box, wherever the transcript is scrolled.** A question from the agent, a tool call waiting for approval, a plan waiting for sign-off: each used to be answerable only at the point in the transcript where the agent asked, and a long turn kept writing under it until the card had scrolled off the top while the status line still said `1 awaiting you`. Every request the run is parked on is now pinned in a strip directly above the prompt box until it is answered, holding the same card with the same controls. The transcript row keeps the ask's place in the story as a one-line marker that jumps to the pin, and becomes the record it always was once the request is settled.
