@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    /* The one project in the repo that compiles JSX under `module: NodeNext`.
+       The renderer's JSX goes through a bundler with `moduleResolution:
+       bundler`; here `tsc` is the whole build, so React's automatic runtime is
+       named explicitly and the emitted `.js` must resolve `react/jsx-runtime`
+       on its own. */
+    "jsx": "react-jsx",
+    "jsxImportSource": "react"
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.test.tsx"],
+  "references": [
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/transcript" },
+    { "path": "../../packages/core" }
+  ]
+}

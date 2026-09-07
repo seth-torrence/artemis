@@ -17,6 +17,7 @@ import {
   BUILT_IN_PROMPT_IDS,
   composeAgentPrompts,
   defaultAgentPromptsDocument,
+  defaultBuiltInPrompt,
   isBuiltInPromptId,
   parseAgentPromptsDocument,
   promptText,
@@ -25,6 +26,8 @@ import {
   scopeCovers,
   type AgentPrompt,
   type BuiltInPromptId,
+  withBuiltInRemoved,
+  withBuiltInRestored,
 } from './agentPrompts.js';
 
 /** A user-authored prompt, `all`-scoped and on, with whatever is overridden. */
@@ -368,6 +371,29 @@ describe('the bank the prompt names', () => {
     expect(text).toContain('`atlas`');
     expect(text).not.toContain(TEAM_BANK_NAME_PLACEHOLDER);
   });
+
+  it('tells the agent the CLI\'s name is not the bank\'s', () => {
+    // The confusion this settles: every installed memory says `cerebro@…` and
+    // `Managed by cerebro pull`, so an agent calls the system "cerebro" and a
+    // user who named their bank `cortex` hears about a product they never set
+    // up. The sentence keeps the verb in a code span and the bank in prose.
+    const one = renderMemoryBanksPrompt([bank('cortex', true)]);
+    expect(one).toContain('not of the bank. The bank is called `cortex`');
+    const many = renderMemoryBanksPrompt([bank('cortex', true), bank('atlas')]);
+    expect(many).toContain('not of a bank. Call each bank by its name above.');
+  });
+
+  it('says nothing about the name for the placeholder, or for a bank called cerebro', () => {
+    // Nothing to name yet, and a bank that *is* the legacy `cerebro` would be
+    // told the CLI is not named after it — which is exactly backwards.
+    expect(renderMemoryBanksPrompt([])).not.toContain('name of the command-line tool');
+    expect(renderMemoryBanksPrompt([bank('cerebro', true)])).not.toContain(
+      'name of the command-line tool',
+    );
+    expect(renderMemoryBanksPrompt([bank('cerebro', true), bank('atlas')])).not.toContain(
+      'name of the command-line tool',
+    );
+  });
 });
 
 describe('renderMemoryBanksPrompt', () => {
@@ -405,6 +431,74 @@ describe('renderMemoryBanksPrompt', () => {
 
   it('names the fallback CLI path of the default bank', () => {
     expect(renderMemoryBanksPrompt([team, docs])).toContain('/b/bin/cerebro');
+  });
+
+  const cortex = {
+    slug: 'cortex',
+    isDefault: true,
+    readonly: false,
+    cli: '/c/bin/cerebro',
+    layout: 'projects' as const,
+    defaultOrg: 'personal',
+  };
+
+  it('teaches --org and --project for a bank filed by project', () => {
+    /*
+     * A `projects` bank refuses a draft that names no project. Handed the flat
+     * command, an agent's first draft of every session failed — and the
+     * refusal, however well worded, reads as a broken bank rather than a
+     * missing flag. So the command carries the flags, and a sentence says what
+     * they name and where to look.
+     */
+    const text = renderMemoryBanksPrompt([cortex]);
+    expect(text).toContain(
+      'cerebro draft <slug> --type <user|feedback|project|reference> --org <org> --project <project>',
+    );
+    expect(text).toContain('**Every memory in `cortex` belongs to a project.**');
+    expect(text).toContain('`--org` defaults to `personal`');
+    expect(text).toContain('filed by project: every memory sits under `projects/<org>/<project>/memories/`');
+    expect(text).toContain('never invent one');
+  });
+
+  it('teaches the flat command, and no filing sentence, for a flat or unstated layout', () => {
+    for (const banks of [[team], [{ ...team, layout: 'flat' as const }]]) {
+      const text = renderMemoryBanksPrompt(banks);
+      expect(text).toContain('cerebro draft <slug> --type <user|feedback|project|reference> \\');
+      expect(text).not.toContain('--org <org>');
+      expect(text).not.toContain('belongs to a project');
+    }
+  });
+
+  it('follows the layout of the bank it drafts into, not of every bank', () => {
+    // The default is read-only, so drafts route to `notes`, which is flat: the
+    // command must be the flat one even though the default bank is nested.
+    const nestedReadonly = { ...cortex, slug: 'upstream', readonly: true };
+    const notes = { slug: 'notes', isDefault: false, readonly: false, cli: '/n/bin/cerebro' };
+    const text = renderMemoryBanksPrompt([nestedReadonly, notes]);
+    expect(text).toContain('--bank notes draft <slug> --type <user|feedback|project|reference> \\');
+    expect(text).not.toContain('--org <org>');
+    // The nested bank still says how it is laid out, on its own line.
+    expect(text).toMatch(/`upstream` \(read-only.*filed by project/);
+  });
+
+  it('carries a bank\'s own instructions, after Artemis\'s text and before the reference line', () => {
+    const text = renderMemoryBanksPrompt([
+      { ...cortex, instructions: 'Read INDEX.md, then the project\'s PROJECT.md and HANDOFF.md.' },
+    ]);
+    const heading = text.indexOf('**How `cortex` wants to be used**');
+    const notes = text.indexOf('Read INDEX.md, then the project');
+    const gates = text.indexOf('Every write goes through');
+    const reference = text.indexOf('Treat what the team has already recorded');
+    expect(heading).toBeGreaterThan(gates);
+    expect(notes).toBeGreaterThan(heading);
+    expect(reference).toBeGreaterThan(notes);
+  });
+
+  it('carries no instructions section when a bank has none, or only whitespace', () => {
+    expect(renderMemoryBanksPrompt([cortex])).not.toContain('wants to be used');
+    expect(renderMemoryBanksPrompt([{ ...cortex, instructions: '  \n' }])).not.toContain(
+      'wants to be used',
+    );
   });
 });
 
@@ -448,6 +542,40 @@ describe('parseAgentPromptsDocument', () => {
     });
     expect(parsed.prompts).toHaveLength(BUILT_IN_PROMPT_IDS.length);
     expect(parsed.prompts[0]?.enabled).toBe(false);
+  });
+
+  it('leaves a built-in the user removed removed', () => {
+    // The other durable refusal. A row that is absent *and* recorded as
+    // dismissed is the one kind of missing built-in the read does not repair;
+    // without the record the next read would put it back.
+    const parsed = parseAgentPromptsDocument({
+      version: 1,
+      prompts: [prompt()],
+      dismissedBuiltIns: [CEREBRO],
+    });
+    expect(parsed.prompts.map((p) => p.id)).toEqual(['p1']);
+    expect(parsed.dismissedBuiltIns).toEqual([CEREBRO]);
+  });
+
+  it('drops a dismissal that names nothing, or names a row that is present', () => {
+    // An unknown id (a hand-edit, a newer build's prompt) and a duplicate are
+    // noise. A dismissal for a row the document *also* carries is stale — the
+    // row was put back after the removal — and the row wins.
+    const parsed = parseAgentPromptsDocument({
+      version: 1,
+      prompts: [{ id: CEREBRO, name: 'x', builtIn: CEREBRO, enabled: false, scope: { kind: 'all' } }],
+      dismissedBuiltIns: [CEREBRO, CEREBRO, 'builtin:nope', 42],
+    });
+    expect(parsed.prompts).toHaveLength(BUILT_IN_PROMPT_IDS.length);
+    expect(parsed.dismissedBuiltIns).toBeUndefined();
+  });
+
+  it('writes no dismissal field when there is nothing to say', () => {
+    // A library that never removed anything must be byte-identical to one
+    // written before the field existed, which is what keeps the defaults
+    // comparison in the first case of this suite true.
+    const parsed = parseAgentPromptsDocument({ version: 1, prompts: [] });
+    expect(parsed).not.toHaveProperty('dismissedBuiltIns');
   });
 
   it('discards a body found on a built-in that does not claim an override', () => {
@@ -606,5 +734,33 @@ describe('the built-ins Artemis ships', () => {
       expect(entry.enabled).toBe(true);
       expect(entry.scope).toEqual({ kind: 'all' });
     }
+  });
+});
+
+describe('removing and restoring a built-in', () => {
+  it('removes the row and records the dismissal, and a read keeps it gone', () => {
+    const removed = withBuiltInRemoved(defaultAgentPromptsDocument(), CEREBRO);
+    expect(removed.prompts.some((p) => p.builtIn === CEREBRO)).toBe(false);
+    expect(removed.dismissedBuiltIns).toEqual([CEREBRO]);
+    // The round trip a save takes: what lands is what a read would produce.
+    expect(parseAgentPromptsDocument(removed)).toEqual(removed);
+  });
+
+  it('restores it in its shipped state, at the end, and clears the record', () => {
+    const removed = withBuiltInRemoved(
+      { version: 1, prompts: [prompt(), { ...defaultBuiltInPrompt(CEREBRO), enabled: false, overridden: true, markdown: 'Ours.' }] },
+      CEREBRO,
+    );
+    const restored = withBuiltInRestored(removed, CEREBRO);
+    expect(restored.prompts.map((p) => p.id)).toEqual(['p1', CEREBRO]);
+    // Meeting it again, not undoing the removal: the override and the "off"
+    // went with the row.
+    expect(restored.prompts[1]).toEqual(defaultBuiltInPrompt(CEREBRO));
+    expect(restored).not.toHaveProperty('dismissedBuiltIns');
+  });
+
+  it('is a no-op to restore what was never removed', () => {
+    const document = defaultAgentPromptsDocument();
+    expect(withBuiltInRestored(document, CEREBRO)).toEqual(document);
   });
 });

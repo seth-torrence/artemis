@@ -74,6 +74,16 @@ services:
       # Uncomment to name the hosts this server answers to instead of `any`
       # (the default for a non-loopback bind):
       # ARTEMIS_ALLOWED_HOSTS: 'artemis.tailnet.example,100.101.102.103'
+      # Bypass permissions on a served Claude account. The image runs as root
+      # and Claude Code refuses `--dangerously-skip-permissions` under root —
+      # "cannot be used with root/sudo privileges" — so the mode is withheld
+      # from the capability list and a run asking for it dies on spawn. This is
+      # the CLI's own opt-in: it says the container *is* the sandbox, the flag
+      # is accepted as root again, and the server offers the mode. Set it only
+      # where you accept what it means: a run that never asks can use anything
+      # this container can reach — every mounted repository, every credential
+      # in /data, every tool on PATH.
+      # IS_SANDBOX: '1'
       # How long a run whose client detached is kept before it is reaped, and
       # how long a permission prompt waits for an answer. Both are ceilings on
       # behaviour a completions client has to opt into per request; the defaults

@@ -228,13 +228,26 @@ describe('permission modes a host cannot honour', () => {
     permissionModes: ['plan', 'default', 'acceptEdits', 'bypassPermissions'],
   } as unknown as ServerProfile['capabilities'];
 
-  async function modesFor(providerId: string, uid: number | undefined) {
+  /** The two variables the CLI reads before refusing, cleared unless a case sets them. */
+  const SANDBOX_KEYS = ['IS_SANDBOX', 'CLAUDE_CODE_BUBBLEWRAP'] as const;
+
+  async function modesFor(
+    providerId: string,
+    uid: number | undefined,
+    env: Partial<Record<(typeof SANDBOX_KEYS)[number], string>> = {},
+  ) {
     const real = process.getuid;
     if (uid === undefined) {
       // Windows has no getuid, and the question does not arise there.
       delete (process as { getuid?: unknown }).getuid;
     } else {
       (process as { getuid?: () => number }).getuid = () => uid;
+    }
+    const realEnv = Object.fromEntries(SANDBOX_KEYS.map((key) => [key, process.env[key]]));
+    for (const key of SANDBOX_KEYS) {
+      const value = env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
     try {
       const catalogue = createCatalogue({
@@ -252,6 +265,11 @@ describe('permission modes a host cannot honour', () => {
     } finally {
       if (real === undefined) delete (process as { getuid?: unknown }).getuid;
       else (process as { getuid?: () => number }).getuid = real;
+      for (const key of SANDBOX_KEYS) {
+        const value = realEnv[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   }
 
@@ -278,5 +296,33 @@ describe('permission modes a host cannot honour', () => {
   it('does not touch a provider whose CLI has no such rule', async () => {
     // The refusal is Claude Code's, not a property of running as root.
     expect(await modesFor('codex', 0)).toContain('bypassPermissions');
+  });
+
+  it('keeps bypassPermissions under root when IS_SANDBOX=1 names the container as the sandbox', async () => {
+    /*
+     * The CLI's own opt-in: under root it accepts the flag when
+     * `IS_SANDBOX=1`, which is how a container whose only user is root says
+     * the sandbox is deliberate. A server started with it can serve the mode,
+     * so the catalogue must offer it — withholding a mode that works is the
+     * same lie as advertising one that does not, told the other way round.
+     */
+    expect(await modesFor('claude', 0, { IS_SANDBOX: '1' })).toContain('bypassPermissions');
+  });
+
+  it("keeps bypassPermissions under root inside the CLI's own bubblewrap", async () => {
+    expect(await modesFor('claude', 0, { CLAUDE_CODE_BUBBLEWRAP: '1' })).toContain(
+      'bypassPermissions',
+    );
+  });
+
+  it('reads IS_SANDBOX the way the CLI does: only "1" counts', async () => {
+    // `true`, `yes`, an empty string — the CLI compares against "1" and nothing
+    // else, and a filter looser than the rule it mirrors would offer a mode
+    // the spawn then kills.
+    expect(await modesFor('claude', 0, { IS_SANDBOX: 'true' })).not.toContain('bypassPermissions');
+    expect(await modesFor('claude', 0, { IS_SANDBOX: '' })).not.toContain('bypassPermissions');
+    expect(await modesFor('claude', 0, { CLAUDE_CODE_BUBBLEWRAP: '' })).not.toContain(
+      'bypassPermissions',
+    );
   });
 });

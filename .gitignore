@@ -35,6 +35,7 @@ pnpm-debug.log*
 !.env.example
 
 # Local test/profile scratch data
+.artemis/
 .artemis-dev/
 test_workspace/
 coverage/

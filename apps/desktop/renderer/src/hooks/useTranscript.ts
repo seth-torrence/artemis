@@ -1,6 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { usePaneRef } from '../state/paneContext';
-import type { ActivityGroup, TranscriptItem } from '../state/transcript';
+import type { ActivityGroup, TranscriptItem } from '@rx-artemis/transcript';
 
 /*
  * REMOVED: `useTranscriptIds`.

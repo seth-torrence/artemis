@@ -141,6 +141,17 @@ jobs:
           sudo apt-get install --yes libarchive-tools
       - run: pnpm run build
       - run: pnpm --filter @rx-artemis/desktop exec electron-builder ${{ matrix.build-args }} --publish never
+      # The terminal UI, as one self-contained tarball for this runner's
+      # platform — see scripts/package-tui.ts. Not on Windows: the TUI has
+      # never been run there, and install.sh is a bash script.
+      - if: runner.os != 'Windows'
+        name: Package the terminal UI
+        run: pnpm exec tsx scripts/package-tui.ts
+      # The feed the Arch updater reads. electron-builder's own names the
+      # AppImage; Artemis installs the .pacman. See scripts/linux-update-feed.ts.
+      - if: runner.os == 'Linux'
+        name: Write the Arch update feed
+        run: pnpm exec tsx scripts/linux-update-feed.ts
       # One feed per mac architecture. electron-builder always writes
       # `latest-mac.yml`; the updater asks for `latest-mac-<arch>.yml`, so a
       # machine can only ever be offered its own architecture's artifact.
@@ -196,10 +207,10 @@ jobs:
           # from the Windows build.
           #
           # Blockmaps are electron-updater's differential-download index, which
-          # our updater never reads. `latest-linux.yml` is left behind for the
-          # same reason it always was: Artemis installs on Linux through a
-          # package manager, so there is no in-place update to feed and
-          # publishing a feed nothing reads would only invite one.
+          # our updater never reads. electron-builder's own `latest-linux.yml`
+          # is still left behind — it names the AppImage, which nothing here
+          # installs — while `latest-linux-pacman.yml`, written above, names
+          # the package the Arch updater actually asks pacman for.
           path: |
             apps/desktop/release/*.dmg
             apps/desktop/release/*.zip
@@ -209,6 +220,8 @@ jobs:
             apps/desktop/release/*.pacman
             apps/desktop/release/latest-mac-*.yml
             apps/desktop/release/latest.yml
+            apps/desktop/release/latest-linux-pacman.yml
+            apps/desktop/release/artemis-tui-*.tar.gz
 
   publish:
     needs: build
@@ -275,7 +288,9 @@ jobs:
 
           # One asset at a time: a retry then costs the file that failed
           # rather than all 700MB of them.
-          for asset in dist/*; do
+          # Files, wherever the artifact put them: a directory here is not an
+          # asset, and uploading one fails the whole release.
+          for asset in $(find dist -type f | sort); do
             for attempt in 1 2 3; do
               if gh release upload "$GITHUB_REF_NAME" "$asset" --clobber; then
                 break

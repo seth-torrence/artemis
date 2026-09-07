@@ -111,6 +111,9 @@ import {
   type SessionListScope,
   type SessionNamingPlan,
   type SignInShell,
+  buildContentBridge,
+  discoverMarketplacePlugins,
+  linkSkillsIntoCodexHome,
 } from '@rx-artemis/core';
 import { applyPlanLimit, composeAgentPrompts, lowestTierModel } from '@rx-artemis/protocol';
 
@@ -123,11 +126,6 @@ import { createMemoryBankSecrets } from './memoryBankSecrets.js';
 import { createProfileSecrets } from './profileSecrets.js';
 import { configureSecretManagers, resolveSecretRef } from './secretManagers.js';
 import { createSecretManagerCredentials } from './secretManagerSecrets.js';
-import {
-  buildContentBridge,
-  discoverMarketplacePlugins,
-  linkSkillsIntoCodexHome,
-} from './contentBridge.js';
 
 const log = createLogger('engine');
 
@@ -988,9 +986,9 @@ function createEngine(options: EngineOptions): ArtemisEngine {
    *    run; the work is putting the links there, and the run picks them up
    *    because Artemis already points `CODEX_HOME` at the profile. It has no
    *    user-authored command surface at all, so there is no command half to
-   *    mirror — see `contentBridge.ts`.
+   *    mirror — see core's `content/bridge.ts`.
    *
-   * `contentBridge.ts` documents why each is shaped the way it is. Resolved per
+   * Core's `content/bridge.ts` documents why each is shaped the way it is. Resolved per
    * run rather than once at startup, because that is what makes something
    * installed while the app is open work on the next message instead of the next
    * launch.
@@ -1003,15 +1001,15 @@ function createEngine(options: EngineOptions): ArtemisEngine {
     const configDir = profileConfigDir(await profiles.require(profileId));
 
     if (providerId === 'codex') {
-      await linkSkillsIntoCodexHome({ configDir });
+      await linkSkillsIntoCodexHome({ configDir, onWarning: (message, error) => log.warn(message, error) });
       return [];
     }
 
     // Concurrent, and independent: one assembles a directory, the other only
     // reads two files to find directories that already exist.
     const [bridged, marketplace] = await Promise.all([
-      buildContentBridge({ configDir, dataDir: options.userDataDir }),
-      discoverMarketplacePlugins({ configDir }),
+      buildContentBridge({ configDir, dataDir: options.userDataDir, onWarning: (message, error) => log.warn(message, error) }),
+      discoverMarketplacePlugins({ configDir, onWarning: (message, error) => log.warn(message, error) }),
     ]);
     return [...bridged, ...marketplace];
   };
@@ -1400,8 +1398,9 @@ function createEngine(options: EngineOptions): ArtemisEngine {
       // []`, so Artemis runs the sync cycle itself — one spawn, every enabled
       // bank. Started before the run and never awaited: it promotes what the
       // last session drafted and pulls what teammates landed, neither of which
-      // this run may wait on.
-      syncMemoryBanksInBackground();
+      // this run may wait on. The run's directory goes along so the bank is
+      // installed for the project about to start — see the function.
+      syncMemoryBanksInBackground(input.cwd);
 
       // Every enabled bank is attached to the run as a directory it may read.
       // A bank lives outside cwd — a clone in `~/Documents`, typically — so a

@@ -20,7 +20,7 @@
  * serving something it does not want to serve.
  */
 
-import type { FileEdit } from './diff';
+import type { FileEdit } from '@rx-artemis/transcript';
 import { isAbsolutePath, separatorFor, type Platform } from './paths';
 
 /** Extensions the preview pane can render. See the note above about the copy. */

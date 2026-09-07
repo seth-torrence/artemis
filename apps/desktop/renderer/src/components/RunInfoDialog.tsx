@@ -24,7 +24,7 @@ import { CheckIcon, XIcon } from 'lucide-react';
 import type { Capabilities } from '@rx-artemis/protocol';
 
 import { CAPABILITY_LABELS, type CapabilityKey } from '../hooks/useCapability';
-import { contextRatio, formatDuration, formatTokens, formatUsd } from '../lib/format';
+import { contextRatio, formatDuration, formatTokens, formatUsd } from '@rx-artemis/transcript';
 import { shortenPath } from '../lib/paths';
 import {
   activeCapabilities,

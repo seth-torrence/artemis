@@ -33,7 +33,7 @@
 import type { ReactElement, ReactNode } from 'react';
 import { FilePlus2Icon, FilePenLineIcon } from 'lucide-react';
 
-import type { DiffRow, FileEdit } from '../lib/diff';
+import type { DiffRow, FileEdit } from '@rx-artemis/transcript';
 import { ToneBadge } from './primitives';
 import { cn } from '@/lib/utils';
 

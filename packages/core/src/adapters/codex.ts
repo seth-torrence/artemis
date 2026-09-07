@@ -45,6 +45,7 @@ import type {
   PermissionResolvedEvent,
   PlanUsage,
   PlanUsageWindow,
+  PlanUsageWindowId,
   ProviderEffortOption,
   ProviderModelOption,
   RunStatus,
@@ -2024,9 +2025,13 @@ export function parseThreadList(
  *
  * Codex reports up to two anonymous windows described by their duration rather
  * than by a name, so the label is derived from `windowDurationMins` — 43200
- * minutes is the monthly window a free plan reported during testing. The window
- * ids are Artemis's own vocabulary; `PlanUsageWindowId` is deliberately
- * open-ended so a provider can contribute its own.
+ * minutes is the monthly window a free plan reported during testing.
+ *
+ * A window five hours long *is* the 5-hour limit and one a week long *is* the
+ * weekly, whatever the provider calls them, so those two take the shared ids
+ * (`five_hour`, `seven_day`) and every readout draws them under the same names
+ * it draws Claude's. Any other duration keeps Artemis's own `primary` /
+ * `secondary`; `PlanUsageWindowId` is deliberately open-ended for that.
  */
 export function parseRateLimitWindows(limits: Record<string, unknown>): PlanUsageWindow[] {
   const windows: PlanUsageWindow[] = [];
@@ -2043,7 +2048,7 @@ export function parseRateLimitWindows(limits: Record<string, unknown>): PlanUsag
     const resetsAt = readNumber(raw, 'resetsAt');
 
     windows.push({
-      id,
+      id: sharedWindowId(durationMins) ?? id,
       label: durationLabel(durationMins),
       utilization: usedPercent ?? null,
       // Unix seconds here, unlike the `*AtMs` fields elsewhere in the protocol.
@@ -2052,6 +2057,13 @@ export function parseRateLimitWindows(limits: Record<string, unknown>): PlanUsag
   }
 
   return windows;
+}
+
+/** The shared id for a duration every plan meters, or `undefined` for one only Codex does. */
+function sharedWindowId(minutes: number | undefined): PlanUsageWindowId | undefined {
+  if (minutes === 5 * 60) return 'five_hour';
+  if (minutes === 7 * 24 * 60) return 'seven_day';
+  return undefined;
 }
 
 function durationLabel(minutes: number | undefined): string {

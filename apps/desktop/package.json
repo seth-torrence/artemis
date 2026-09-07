@@ -1,6 +1,6 @@
 {
   "name": "@rx-artemis/desktop",
-  "version": "2.4.8",
+  "version": "2.7.3",
   "private": true,
   "description": "Artemis desktop application \u2014 Electron main, preload bridge and React renderer.",
   "author": {
@@ -29,6 +29,7 @@
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@rx-artemis/core": "workspace:*",
     "@rx-artemis/protocol": "workspace:*",
+    "@rx-artemis/transcript": "workspace:*",
     "electron-store": "^11.0.2",
     "highlight.js": "^11.12.0",
     "node-pty": "^1.1.0",

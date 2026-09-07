@@ -40,10 +40,10 @@ import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { CheckIcon, ShieldAlertIcon, TriangleAlertIcon, XIcon } from 'lucide-react';
 import type { PermissionRuleUpdate } from '@rx-artemis/protocol';
 
-import { formatJson } from '../lib/format';
+import { formatJson } from '@rx-artemis/transcript';
 import { DEFAULT_DENIAL, activeProfile, respondToPermission } from '../state/store';
 import { usePane, usePaneRef } from '../state/paneContext';
-import type { PermissionItem } from '../state/transcript';
+import type { PermissionItem } from '@rx-artemis/transcript';
 import { InlinePlan } from './InlinePlan';
 import { InlineQuestion } from './InlineQuestion';
 import { CodeBlock, Fold, ToneBadge } from './primitives';

@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { condenseTitle } from './format';
+import { condenseTitle } from './format.js';
 
 describe('condenseTitle', () => {
   it('leaves a real title alone', () => {

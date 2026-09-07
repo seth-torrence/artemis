@@ -56,6 +56,8 @@ const {
   artifactExtension,
   createUpdater,
   feedName,
+  forgetPacmanOwnership,
+  ownedByPacman,
   feedToInstall,
   fetchAnonymously,
   fetchAsset,
@@ -239,6 +241,14 @@ describe('the feed this platform reads', () => {
       if (archWas) Object.defineProperty(process, 'arch', archWas);
     }
   };
+
+  it('asks for its own Linux feed, and the package it names', () => {
+    // electron-builder's `latest-linux.yml` names the AppImage; the Arch
+    // updater installs the .pacman, so the feed it reads is a different file
+    // written by `scripts/linux-update-feed.ts`.
+    expect(onPlatform('linux', 'x64', feedName)).toBe('latest-linux-pacman.yml');
+    expect(onPlatform('linux', 'x64', artifactExtension)).toBe('.pacman');
+  });
 
   it('asks for one feed per mac architecture, and the zip they name', () => {
     expect(onPlatform('darwin', 'arm64', feedName)).toBe('latest-mac-arm64.yml');
@@ -549,5 +559,51 @@ describe('throttleProgress', () => {
     emit(reading(2, null));
 
     expect(seen).toHaveLength(1);
+  });
+});
+
+/*
+ * Which Linux installs Artemis may replace.
+ *
+ * The Arch path rests entirely on one question — does pacman own the running
+ * executable — because that is what decides whether `pacman -U` is Artemis's
+ * to call or someone else's business. An AppImage on an Arch machine must
+ * answer no as firmly as a Debian one does.
+ */
+describe('ownedByPacman', () => {
+  const onPlatform = (platform: string, read: () => boolean): boolean => {
+    const was = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+    forgetPacmanOwnership();
+    try {
+      return read();
+    } finally {
+      if (was) Object.defineProperty(process, 'platform', was);
+      forgetPacmanOwnership();
+    }
+  };
+
+  it('is false on every platform that has no pacman at all', () => {
+    expect(onPlatform('darwin', ownedByPacman)).toBe(false);
+    expect(onPlatform('win32', ownedByPacman)).toBe(false);
+  });
+
+  it('answers for this executable and this package, not merely for the machine', () => {
+    /*
+     * The suite runs under node, and on Arch `/usr/bin/node` is owned by the
+     * `nodejs` package — so a check that only asked "does pacman own this
+     * file" would answer yes here, and on a developer's machine that is the
+     * difference between "no updater" and "an updater offering to pacman -U
+     * an Artemis release over your node install". The owning package has to
+     * be Artemis. On any machine without pacman this never asks at all, and
+     * lands on the same answer.
+     */
+    expect(onPlatform('linux', ownedByPacman)).toBe(false);
+  });
+
+  it('remembers, so the menu and the timer cannot disagree mid-session', () => {
+    const first = onPlatform('linux', ownedByPacman);
+    forgetPacmanOwnership();
+    expect(onPlatform('linux', ownedByPacman)).toBe(first);
   });
 });

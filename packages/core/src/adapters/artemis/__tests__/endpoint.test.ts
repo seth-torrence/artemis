@@ -99,8 +99,9 @@ function chunk(delta: Record<string, unknown>, extra: Record<string, unknown> = 
 async function drive(
   origin: string,
   input: Partial<ResolvedRunInput> = {},
+  options: Parameters<typeof createArtemisAdapter>[0] = {},
 ): Promise<readonly AgentEvent[]> {
-  const adapter = createArtemisAdapter();
+  const adapter = createArtemisAdapter(options);
   const run = await adapter.createRun({
     runId: 'run-1' as RunId,
     providerId: 'artemis',
@@ -162,17 +163,33 @@ describe('a fresh turn', () => {
     expect(types[0]).toBe('session.started');
     expect(events[0]).toMatchObject({ sessionId: 'sess-abc', providerId: 'artemis' });
 
+    // The answer closes before the report of how it was reached lands.
     expect(types).toEqual([
       'session.started',
       'text.delta',
       'text.delta',
-      'tool.start',
-      'tool.end',
-      'tool.start',
-      'tool.end',
       'text.complete',
+      'tool.start',
+      'tool.end',
+      'tool.start',
+      'tool.end',
       'run.end',
     ]);
+
+    // The completion names the block its deltas built. Without the index, a
+    // transcript that had already settled the block under the tool rows could
+    // not find it, opened a second one, and drew the whole answer twice.
+    const deltas = events.filter((event) => event.type === 'text.delta');
+    expect(deltas).toMatchObject([
+      { messageId: 'run-1-0', blockIndex: 0, text: 'Hel' },
+      { messageId: 'run-1-0', blockIndex: 0, text: 'lo.' },
+    ]);
+    expect(events.find((event) => event.type === 'text.complete')).toMatchObject({
+      messageId: 'run-1-0',
+      blockIndex: 0,
+      role: 'assistant',
+      text: 'Hello.',
+    });
 
     const end = events.at(-1);
     expect(end).toMatchObject({
@@ -237,6 +254,70 @@ describe('a fresh turn', () => {
     // the server finally says. What is not tolerated is a made-up id.
     expect(types).toEqual(['text.delta', 'session.started', 'text.complete', 'run.end']);
     expect(events.at(-1)).toMatchObject({ sessionId: 'sess-late' });
+  });
+
+  it('draws reasoning as thinking rows, in the order it arrived', async () => {
+    // The wire carries reasoning on `reasoning_content` — a flat stream beside
+    // the answer's. Each stretch becomes a block of its own, numbered in
+    // arrival order, so reasoning the model did *after* its first sentence
+    // lands after that sentence rather than being glued onto the fold above.
+    const { origin } = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      response.write(sse(chunk({ role: 'assistant' })));
+      response.write(sse(chunk({ reasoning_content: 'First, ' })));
+      response.write(sse(chunk({ reasoning_content: 'look.' })));
+      response.write(sse(chunk({ content: 'Found it. ' })));
+      response.write(sse(chunk({ reasoning_content: 'Now the other file.' })));
+      response.write(sse(chunk({ content: 'Both fixed.' })));
+      response.write(
+        sse(chunk({}, { finish_reason: 'stop', artemis: { sessionId: 'sess-abc', endReason: 'completed' } })),
+      );
+      response.write(sse('[DONE]'));
+      response.end();
+    });
+
+    const events = await drive(origin);
+    const blocks = events
+      .filter((event) => event.type !== 'session.started' && event.type !== 'run.end')
+      .map((event) => {
+        const { type, blockIndex, text } = event as { type: string; blockIndex: number; text: string };
+        return { type, blockIndex, text };
+      });
+
+    expect(blocks).toEqual([
+      { type: 'thinking.delta', blockIndex: 0, text: 'First, ' },
+      { type: 'thinking.delta', blockIndex: 0, text: 'look.' },
+      { type: 'text.delta', blockIndex: 1, text: 'Found it. ' },
+      // The answer block closes the moment the model goes back to thinking,
+      // whole, under the index its delta carried.
+      { type: 'text.complete', blockIndex: 1, text: 'Found it. ' },
+      { type: 'thinking.delta', blockIndex: 2, text: 'Now the other file.' },
+      { type: 'text.delta', blockIndex: 3, text: 'Both fixed.' },
+      { type: 'text.complete', blockIndex: 3, text: 'Both fixed.' },
+    ]);
+    // Every block belongs to the one message the turn is.
+    expect(new Set(events.map((event) => (event as { messageId?: string }).messageId).filter(Boolean)))
+      .toEqual(new Set(['run-1-0']));
+  });
+
+  it('reads reasoning under the other name it travels by', async () => {
+    // `reasoning` is the second spelling in the wild; the local reader takes
+    // both, and so does this one.
+    const { origin } = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      response.write(sse(chunk({ role: 'assistant' })));
+      response.write(sse(chunk({ reasoning: 'hmm' })));
+      response.write(sse(chunk({ content: 'ok' })));
+      response.write(sse(chunk({}, { finish_reason: 'stop', artemis: { endReason: 'completed' } })));
+      response.write(sse('[DONE]'));
+      response.end();
+    });
+
+    const events = await drive(origin);
+    expect(events.find((event) => event.type === 'thinking.delta')).toMatchObject({
+      blockIndex: 0,
+      text: 'hmm',
+    });
   });
 
   it('reports a stream that died mid-turn as an error with no session at all', async () => {
@@ -813,5 +894,253 @@ describe('the probe and the catalogue', () => {
       cwd: process.cwd(),
     });
     expect(catalogue).toEqual({ models: [], live: false });
+  });
+});
+
+/**
+ * A stream that dies, and the run that does not.
+ *
+ * The socket is destroyed mid-turn on purpose, exactly as a laptop lid or a
+ * dropped tunnel would do it, and the same test server then answers the
+ * resume route. What is pinned: the adapter reconnects from the last cursor
+ * it rendered, draws each piece once, and ends on the run's real end — or on
+ * the server saying the run is gone, or on the user's own stop.
+ */
+describe('a stream that dies under the run', () => {
+  const FAST = { reconnect: { backoffMs: [10], watchdogMs: 100 } };
+
+  /** Split a scripted stream between the first socket and the resume. */
+  function resumable(script: {
+    readonly first: (response: ServerResponse) => void;
+    readonly resume: (response: ServerResponse, url: string) => void;
+  }) {
+    return serve((request, response) => {
+      if (request.url === '/v1/chat/completions') {
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+        script.first(response);
+        return;
+      }
+      if (request.url?.startsWith('/api/v0/runs/run-x/stream')) {
+        script.resume(response, request.url);
+        return;
+      }
+      response.writeHead(404).end();
+    });
+  }
+
+  it('picks the run back up from the last chunk it rendered, and draws nothing twice', async () => {
+    const { origin, seen } = await resumable({
+      first: (response) => {
+        response.write(sse(chunk({ role: 'assistant' })));
+        response.write(sse(chunk({}, { artemis: { runId: 'run-x' } })));
+        response.write(sse(chunk({}, { artemis: { sessionId: 'sess-abc', seq: 0 } })));
+        response.write(sse(chunk({ content: 'Hel' }, { artemis: { seq: 1 } })));
+        setTimeout(() => response.destroy(), 20);
+      },
+      resume: (response) => {
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+        response.write(sse(chunk({}, { artemis: { runId: 'run-x' } })));
+        response.write(sse(chunk({ content: 'lo.' }, { artemis: { seq: 2 } })));
+        response.write(
+          sse(
+            chunk(
+              {},
+              { finish_reason: 'stop', artemis: { sessionId: 'sess-abc', endReason: 'completed', seq: 3 } },
+            ),
+          ),
+        );
+        response.write(sse('[DONE]'));
+        response.end();
+      },
+    });
+
+    const events = await drive(origin, {}, FAST);
+
+    // The resume asked for everything after the last numbered chunk.
+    expect(seen.map((request) => request.url)).toEqual([
+      '/v1/chat/completions',
+      '/api/v0/runs/run-x/stream?after=1',
+    ]);
+    expect(seen[1]?.authorization).toBe('Bearer tok_123');
+
+    const text = events.filter((event) => event.type === 'text.delta').map((event) => (event as { text: string }).text);
+    expect(text).toEqual(['Hel', 'lo.']);
+    // The reader is told the link went and came back, in the adapter's own
+    // voice, and the answer block that was open is closed under the notice
+    // so what follows lands below it.
+    const notices = events.filter(
+      (event) => event.type === 'text.complete' && (event as { synthetic?: boolean }).synthetic === true,
+    );
+    expect(notices.map((event) => (event as { text: string }).text)).toEqual([
+      expect.stringContaining('dropped'),
+      expect.stringContaining('Reconnected'),
+    ]);
+    const completes = events.filter(
+      (event) => event.type === 'text.complete' && (event as { synthetic?: boolean }).synthetic !== true,
+    );
+    expect(completes).toMatchObject([
+      { blockIndex: 0, text: 'Hel' },
+      { blockIndex: 1, text: 'lo.' },
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', reason: 'completed', sessionId: 'sess-abc' });
+    expect(events.filter((event) => event.type === 'session.started')).toHaveLength(1);
+  });
+
+  it('resumes from the beginning when nothing it rendered was numbered', async () => {
+    const { origin, seen } = await resumable({
+      first: (response) => {
+        response.write(sse(chunk({ role: 'assistant' })));
+        response.write(sse(chunk({}, { artemis: { runId: 'run-x' } })));
+        setTimeout(() => response.destroy(), 20);
+      },
+      resume: (response) => {
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+        response.write(sse(chunk({ content: 'All of it.' }, { artemis: { seq: 0 } })));
+        response.write(sse(chunk({}, { finish_reason: 'stop', artemis: { endReason: 'completed', seq: 1 } })));
+        response.write(sse('[DONE]'));
+        response.end();
+      },
+    });
+
+    const events = await drive(origin, {}, FAST);
+    expect(seen[1]?.url).toBe('/api/v0/runs/run-x/stream');
+    expect(events.filter((event) => event.type === 'text.delta')).toMatchObject([{ text: 'All of it.' }]);
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', reason: 'completed' });
+  });
+
+  it('keeps trying through a server that is not back yet', async () => {
+    let attempts = 0;
+    const { origin } = await resumable({
+      first: (response) => {
+        response.write(sse(chunk({}, { artemis: { runId: 'run-x' } })));
+        setTimeout(() => response.destroy(), 20);
+      },
+      resume: (response) => {
+        attempts += 1;
+        if (attempts < 3) {
+          // Still coming up: a 503, then a socket that dies before headers.
+          if (attempts === 1) response.writeHead(503).end();
+          else response.destroy();
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+        response.write(sse(chunk({}, { finish_reason: 'stop', artemis: { endReason: 'completed', seq: 0 } })));
+        response.write(sse('[DONE]'));
+        response.end();
+      },
+    });
+
+    const events = await drive(origin, {}, FAST);
+    expect(attempts).toBe(3);
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', reason: 'completed' });
+  });
+
+  it('gives up, and says why, when the server no longer has the run', async () => {
+    const { origin } = await resumable({
+      first: (response) => {
+        response.write(sse(chunk({}, { artemis: { runId: 'run-x' } })));
+        response.write(sse(chunk({ content: 'Hal' }, { artemis: { seq: 0 } })));
+        setTimeout(() => response.destroy(), 20);
+      },
+      resume: (response) => {
+        response.writeHead(404, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'No such run for this connection.' } }));
+      },
+    });
+
+    const events = await drive(origin, {}, FAST);
+    const end = events.at(-1) as { type: string; reason: string; error?: { message: string } };
+    expect(end.type).toBe('run.end');
+    expect(end.reason).toBe('error');
+    expect(end.error?.message).toContain('no longer has this run');
+  });
+
+  it('presumes a silent stream dead once the server has shown it heartbeats', async () => {
+    let firstSocket: ServerResponse | undefined;
+    const { origin, seen } = await resumable({
+      first: (response) => {
+        firstSocket = response;
+        response.write(sse(chunk({}, { artemis: { runId: 'run-x' } })));
+        response.write(':hb\n\n');
+        // …and then nothing, for longer than the watchdog allows.
+      },
+      resume: (response) => {
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+        response.write(sse(chunk({ content: 'Back.' }, { artemis: { seq: 0 } })));
+        response.write(sse(chunk({}, { finish_reason: 'stop', artemis: { endReason: 'completed', seq: 1 } })));
+        response.write(sse('[DONE]'));
+        response.end();
+      },
+    });
+
+    const events = await drive(origin, {}, FAST);
+    firstSocket?.destroy();
+    expect(seen.map((request) => request.url)).toEqual([
+      '/v1/chat/completions',
+      '/api/v0/runs/run-x/stream',
+    ]);
+    expect(events.filter((event) => event.type === 'text.delta')).toMatchObject([{ text: 'Back.' }]);
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', reason: 'completed' });
+  });
+
+  it('waits out silence on a server that has never heartbeated', async () => {
+    // An older server sends no comments; its long tool calls are silent and
+    // that silence is not evidence. The watchdog stays unarmed.
+    const { origin, seen } = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      response.write(sse(chunk({}, { artemis: { runId: 'run-x' } })));
+      setTimeout(() => {
+        response.write(sse(chunk({ content: 'Late.' })));
+        response.write(sse(chunk({}, { finish_reason: 'stop', artemis: { endReason: 'completed' } })));
+        response.write(sse('[DONE]'));
+        response.end();
+      }, 300);
+    });
+
+    const events = await drive(origin, {}, FAST);
+    expect(seen.map((request) => request.url)).toEqual(['/v1/chat/completions']);
+    expect(events.filter((event) => event.type === 'text.delta')).toMatchObject([{ text: 'Late.' }]);
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', reason: 'completed' });
+  });
+
+  it('stops trying the moment the user stops the run', async () => {
+    const { origin, seen } = await resumable({
+      first: (response) => {
+        response.write(sse(chunk({}, { artemis: { runId: 'run-x' } })));
+        setTimeout(() => response.destroy(), 20);
+      },
+      resume: (response) => {
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+        response.write(sse('[DONE]'));
+        response.end();
+      },
+    });
+
+    const adapter = createArtemisAdapter({ reconnect: { backoffMs: [60_000], watchdogMs: 100 } });
+    const run = await adapter.createRun({
+      runId: 'run-1' as RunId,
+      providerId: 'artemis',
+      profileId: 'profile-1',
+      cwd: process.cwd(),
+      prompt: 'hello',
+      model: 'work/opus',
+      env: { [LOCAL_BASE_URL_ENV]: origin, [LOCAL_API_KEY_ENV]: 'tok_123' },
+    } as ResolvedRunInput);
+
+    const events: AgentEvent[] = [];
+    const startedAt = Date.now();
+    for await (const event of run.events) {
+      events.push(event);
+      // The link is reported lost; the user stops the run during the wait.
+      if (event.type === 'text.complete') void run.interrupt();
+    }
+    // Ended from inside a sixty-second wait, well inside it.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', reason: 'interrupted' });
+    // The interrupt route was posted, the resume never was.
+    expect(seen.map((request) => request.url)).toEqual([
+      '/v1/chat/completions',
+      '/api/v0/runs/run-x/interrupt',
+    ]);
   });
 });

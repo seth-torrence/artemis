@@ -43,7 +43,7 @@ import type {
   ToolEndStatus,
   UsageSnapshot,
 } from '@rx-artemis/protocol';
-import { classifyTool, type ActivityCounts, type ToolCategory } from '../lib/tools';
+import { classifyTool, type ActivityCounts, type ToolCategory } from './tools.js';
 
 /* -------------------------------------------------------------------------- */
 /* Items                                                                      */
@@ -204,6 +204,16 @@ export interface RunEndItem extends ItemBase {
   readonly durationMs?: number;
   readonly numTurns?: number;
   readonly result?: string;
+  /**
+   * The run produced nothing at all — no answer, no tool call, no reasoning.
+   *
+   * Worth naming because the alternative is indistinguishable from it: a bare
+   * `52ms · 0 tok` under a message reads as the agent shrugging, when what
+   * happened is that the provider had nothing to send. Set on every run-end,
+   * so `false` is a run that did something rather than a run from a build
+   * that did not know to ask.
+   */
+  readonly silent: boolean;
 }
 
 export type TranscriptItem =
@@ -487,6 +497,8 @@ export class TranscriptModel {
    * run, so two blocks with a call between them are neighbours on screen.
    */
   private thinkingStreak: string | null = null;
+  /** Has the agent produced anything in the run now open? See `RunEndItem.silent`. */
+  private produced = false;
   private thinkingMerged = new Map<string, string>();
 
   /** Optimistic user items still waiting for the provider to echo them. */
@@ -755,11 +767,14 @@ export class TranscriptModel {
     this.settleStreaming();
     this.failOpenToolCalls(reason);
     const id = `e:${++this.counter}`;
+    const silent = !this.produced;
+    this.produced = false;
     this.insert({
       id,
       ts: Date.now(),
       kind: 'run-end',
       reason,
+      silent,
       ...(error === undefined ? {} : { error }),
     });
     this.lastSeq = null;
@@ -1045,11 +1060,14 @@ export class TranscriptModel {
         this.settleStreaming();
         this.failOpenToolCalls(event.reason);
         const id = `e:${++this.counter}`;
+        const silent = !this.produced;
+        this.produced = false;
         this.insert({
           id,
           ts: event.ts,
           kind: 'run-end',
           reason: event.reason,
+          silent,
           ...(event.error === undefined ? {} : { error: event.error }),
           ...(event.usage === undefined ? {} : { usage: event.usage }),
           ...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
@@ -1174,6 +1192,12 @@ export class TranscriptModel {
      * of them adjacent on screen.
      */
     if (item.kind !== 'thinking' && item.kind !== 'tool') this.thinkingStreak = null;
+    // Anything the *agent* put here counts as the run having produced
+    // something; the person's own prompt and our local notices do not. Read
+    // and cleared by the `run.end` that closes the run. See `RunEndItem.silent`.
+    if (item.kind === 'assistant' || item.kind === 'thinking' || item.kind === 'tool' || item.kind === 'command') {
+      this.produced = true;
+    }
     this.items.set(item.id, item);
     this.ids.push(item.id);
     if (item.kind === 'assistant' || item.kind === 'thinking') this.buffers.set(item.id, item.text);

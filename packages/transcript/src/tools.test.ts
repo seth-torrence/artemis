@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTool, describeActivity } from './tools';
+import { classifyTool, describeActivity } from './tools.js';
 
 describe('classifyTool', () => {
   it('knows Claude vocabulary', () => {

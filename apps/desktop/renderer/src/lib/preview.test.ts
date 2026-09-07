@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { FileEdit } from './diff';
+import type { FileEdit } from '@rx-artemis/transcript';
 import { previewablePath } from './preview';
 
 /** A minimal `FileEdit`; only `path` and `extension` are read. */
