@@ -1,6 +1,10 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.9.0
+
+**A parked request is answered above the prompt box, wherever the transcript is scrolled.** A question from the agent, a tool call waiting for approval, a plan waiting for sign-off: each used to be answerable only at the point in the transcript where the agent asked, and a long turn kept writing under it until the card had scrolled off the top while the status line still said `1 awaiting you`. Every request the run is parked on is now pinned in a strip directly above the prompt box until it is answered, holding the same card with the same controls. The transcript row keeps the ask's place in the story as a one-line marker that jumps to the pin, and becomes the record it always was once the request is settled.
+
 ## What's new in 2.8.0
 
 A memory bank says how it is filed, a served run reads your standing instructions, and a bypass-permissions run works from a root container that says it is the sandbox.
