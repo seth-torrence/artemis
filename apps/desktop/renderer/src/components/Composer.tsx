@@ -82,6 +82,7 @@ import { registerComposer } from '../lib/composerFocus';
 import { COLUMN_MAX } from './Transcript';
 import { applySlashCommand, matchSlashCommands } from '../lib/slashCommands';
 import { ActivityRule } from './Activity';
+import { ParkedAsks } from './ParkedAsks';
 import { SlashCommandMenu, SLASH_LISTBOX_ID, slashOptionId } from './SlashCommandMenu';
 import { ReasonButton, WithReason } from './disabled-reason';
 import { WorkingDirectoryChip } from './WorkingDirectory';
@@ -539,6 +540,18 @@ export function Composer(): ReactElement {
       </div>
 
       {/*
+        What the run is parked on, pinned here until answered.
+
+        Above the field rather than at the point in the transcript where it
+        was asked, because this is the one part of the column that is on
+        screen wherever the conversation is scrolled — a card that scrolls off
+        the top with the status line still counting it is an agent waiting on
+        an answer nobody can find. The transcript keeps a marker in its place
+        that jumps here. See `ParkedAsks`.
+      */}
+      <ParkedAsks columnMax={columnMax} />
+
+      {/*
         A message sent into a running turn, still waiting to be read.
 
         The provider folds a mid-turn message in at its next tool break;
@@ -707,8 +720,8 @@ export function Composer(): ReactElement {
                   ? `Waiting for the run to finish — ${steering.reason}`
                   : pending > 0
                     ? asking
-                      ? 'The agent is waiting on an answer above…'
-                      : 'A tool call is waiting for your approval above…'
+                      ? 'The agent is waiting on your answer, just above this box…'
+                      : 'A tool call is waiting for your approval, just above this box…'
                     : suggestion !== null
                       ? suggestion
                       : live
