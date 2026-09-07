@@ -20,6 +20,25 @@
  * what centres the search on the window rather than on the leftovers. This is
  * round seven's frame (docs/design/7d-full.html), landed 2026-08-30.
  *
+ * ## The sides never give up room for their own controls; the search does
+ *
+ * A zero basis means flexbox hands each side half of what the search leaves,
+ * with no regard for what the side holds — and with `min-w-0` a side could be
+ * narrower than its contents, which then spilled out of it. The right group
+ * packs to its end, so its spill went *leftwards*, and an update chip beside
+ * a waiting badge painted straight over the search field on any window under
+ * about 1400px. Both sides are `min-w-fit` now: a side is never narrower than
+ * the controls in it, so when the three do not fit it is the search — the one
+ * of them with a keyboard shortcut — that gives up width, and it is `min-w-0`
+ * so it can. With room to spare nothing changes: the two sides still grow
+ * equally from zero, and the search stays centred on the window.
+ *
+ * The one thing that has to stay out of a side's minimum is the title, or the
+ * left group would demand the width of the longest session name and never
+ * truncate again. `contain-inline-size` on the `h1` makes its intrinsic width
+ * zero, so it contributes nothing to what the side asks for and takes whatever
+ * the side is left with.
+ *
  * ## This bar replaced the title bar rather than sitting under it
  *
  * `main/window.ts` hides the platform's title bar, so what is drawn here is the
@@ -94,6 +113,7 @@ import {
   ChevronRightIcon,
   CopyIcon,
   EllipsisVerticalIcon,
+  FilesIcon,
   FolderIcon,
   GlobeIcon,
   LoaderCircleIcon,
@@ -109,6 +129,7 @@ import {
   XIcon,
 } from 'lucide-react';
 
+import { useDocuments } from '../hooks/useDocuments';
 import { keyLabel } from '../hooks/useHotkeys';
 import { useWindowState } from '../hooks/useWindowState';
 import { installUpdate, restartForUpdate, useUpdateState } from '../hooks/useUpdateState';
@@ -126,6 +147,7 @@ import {
   splitPane,
   togglePalette,
   toggleBrowser,
+  toggleDocuments,
   toggleFiles,
   toggleTasks,
   toggleTerminal,
@@ -305,6 +327,10 @@ export function AppHeader(): ReactElement {
   // open, and a selector returning the array would re-render the header on every
   // progress message the delegated work emits.
   const delegated = usePane((s) => s.tasks.length);
+  // The same shape for the documents: the row shows how many there are, and
+  // the list behind it is recomputed only when a document arrives — the
+  // artifacts snapshot it reads keeps its identity through every token.
+  const documents = useDocuments().length;
   // Subscribed once, here, and passed down. Two components calling the hook
   // would open two IPC subscriptions to describe one window.
   const windowState = useWindowState();
@@ -332,8 +358,12 @@ export function AppHeader(): ReactElement {
         Now the control has one home at a time. Open, it is the chevron on the
         list's own caption; closed, it is this button, in the one strip that
         never disappears. `⌘B` works in both states either way.
+
+        `min-w-fit`, not `min-w-0`: the side is never narrower than the
+        controls in it — see the header note. The title is kept out of that
+        minimum below, so this is the toggle, the chip and the project name.
       */}
-      <div className="flex min-w-0 flex-1 basis-0 items-center gap-1">
+      <div className="flex min-w-fit flex-1 basis-0 items-center gap-1">
         {collapsed ? (
           <IconButton
             label={`Show the sidebar (${keyLabel('mod+b')})`}
@@ -343,7 +373,10 @@ export function AppHeader(): ReactElement {
             <PanelLeftIcon />
           </IconButton>
         ) : null}
-        <div className="mx-1 flex min-w-0 items-center gap-1.5">
+        {/* `flex-1` so the title inside can take the room the side is given;
+            without it this box would size to its content, and a title whose
+            intrinsic width is zero has none. */}
+        <div className="mx-1 flex min-w-0 flex-1 items-center gap-1.5">
           <RemoteChip />
           {project === null ? (
             /* Faint, not amber. This is a placeholder for a value nobody has
@@ -363,7 +396,12 @@ export function AppHeader(): ReactElement {
             </span>
           )}
           <ChevronRightIcon className="size-3 shrink-0 text-ink-faint" aria-hidden="true" />
-          <h1 className="min-w-0 truncate text-xs font-normal text-ink-muted">{title}</h1>
+          {/* `contain-inline-size` zeroes its intrinsic width, which keeps the
+              longest session name out of the side's minimum; `flex-1` then
+              hands it whatever is left, and `truncate` ends it there. */}
+          <h1 className="min-w-0 flex-1 contain-inline-size truncate text-xs font-normal text-ink-muted">
+            {title}
+          </h1>
         </div>
       </div>
 
@@ -375,11 +413,16 @@ export function AppHeader(): ReactElement {
       */}
       <SearchEntry />
 
-      {/* The right third. Status first, then the opener, then the app. */}
-      <div className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-1">
+      {/* The right third. Status first, then the opener, then the app.
+
+          `min-w-fit`: this side packs to its end, so anything it could not
+          hold spilled leftwards over the search — the update chip and the
+          waiting badge, exactly when both were up. It now asks for the width
+          of its controls and the search gives way instead. */}
+      <div className="flex min-w-fit flex-1 basis-0 items-center justify-end gap-1">
         <UpdateChip />
         <WaitingBadge />
-        <OpenMenu delegated={delegated} pane={pane} />
+        <OpenMenu delegated={delegated} documents={documents} pane={pane} />
         <IconButton
           label={`Settings (${keyLabel('mod+,')})`}
           onClick={() => openSettings()}
@@ -425,12 +468,24 @@ export function AppHeader(): ReactElement {
  * Delegated work keeps its disabled-with-reason contract from the button it
  * replaces: shown, struck through by the platform's disabled styling, with the
  * sentence in `title` — never hidden.
+ *
+ * Documents is the row that answers "where did that report go". Every
+ * document the agent makes is a tile in the thread, where it was made — which
+ * is the right place while the reader is there and forty screens up an hour
+ * later. The row opens the index of them in the dock, and carries the count
+ * the way Delegated does, so the menu says whether there is anything to find
+ * before it is opened. Never disabled: a conversation that has made nothing
+ * has an empty list that says so, and a struck-through row on exactly the
+ * conversation where someone wonders whether anything was made would be the
+ * menu refusing to answer the question.
  */
 function OpenMenu({
   delegated,
+  documents,
   pane,
 }: {
   readonly delegated: number;
+  readonly documents: number;
   readonly pane: ReturnType<typeof usePaneRef>;
 }): ReactElement {
   return (
@@ -457,6 +512,11 @@ function OpenMenu({
         <DropdownMenuItem onSelect={() => toggleFiles(pane)}>
           <FolderIcon />
           Working folder
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => toggleDocuments(pane)}>
+          <FilesIcon />
+          Documents
+          {documents > 0 ? <DropdownMenuShortcut>{documents}</DropdownMenuShortcut> : null}
         </DropdownMenuItem>
         <DropdownMenuItem
           disabled={delegated === 0}
@@ -664,6 +724,9 @@ function busyLabel(step: UpdateStep | null, version: string, percent: number | n
  * `max-w-md` and `hidden lg:flex`: it is the first thing that should give up
  * room, since the two things beside it — what you are looking at, and what
  * wants you — are facts, and this is a door that has a keyboard shortcut.
+ * `min-w-0` is what lets it: with the two sides holding their controls'
+ * width (`min-w-fit`, see the header note), this is the one item on the bar
+ * that shrinks, and it shrinks before anything can be painted over it.
  */
 function SearchEntry(): ReactElement {
   return (
