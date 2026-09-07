@@ -52,9 +52,10 @@ import {
 } from 'lucide-react';
 import type { DirectoryEntry } from '@rx-artemis/protocol';
 
+import { usePaneCwd } from '../hooks/usePaneCwd';
 import { call, resolveBridge } from '../lib/bridge';
 import { allLivePanes, openFile, useApp } from '../state/store';
-import { paneState, type Pane, type PaneId } from '../state/pane';
+import type { PaneId } from '../state/pane';
 import { DockHeader } from './DockHeader';
 import { IconButton } from './disabled-reason';
 import { cn } from '@/lib/utils';
@@ -115,33 +116,6 @@ interface Listing {
   readonly path: string;
   readonly entries: readonly DirectoryEntry[];
   readonly truncated: boolean;
-}
-
-/**
- * The folder this column is working in, subscribed.
- *
- * By hand rather than through `usePane`, for `usePaneTasks`' reason: the dock
- * is drawn outside every `PaneProvider`, and a column can close between the
- * strip being computed and this rendering — so the pane is `undefined` on some
- * renders, and a hook cannot be skipped on those.
- *
- * Reading `paneState(pane).cwd` once at render would compile and be wrong: the
- * window store does not change when a conversation is pointed somewhere else,
- * so the browser would sit in the old tree until something unrelated redrew it.
- */
-function usePaneCwd(pane: Pane | undefined): string {
-  const [cwd, setCwd] = useState(() => (pane === undefined ? '' : paneState(pane).cwd));
-
-  useEffect(() => {
-    if (pane === undefined) {
-      setCwd('');
-      return;
-    }
-    setCwd(paneState(pane).cwd);
-    return pane.store.subscribe(() => setCwd(paneState(pane).cwd));
-  }, [pane]);
-
-  return cwd;
 }
 
 export function FilesPane({ paneId }: { readonly paneId: PaneId }): ReactElement | null {

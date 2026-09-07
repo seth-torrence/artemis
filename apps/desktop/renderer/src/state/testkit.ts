@@ -65,6 +65,7 @@ const SESSION_KEYS: Readonly<Record<keyof SessionState, true>> = {
   dismissedTasks: true,
   tasksRequested: true,
   filesRequested: true,
+  documentsRequested: true,
   promptHistory: true,
   handoff: true,
   handoffOffer: true,
