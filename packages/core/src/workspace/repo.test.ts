@@ -20,7 +20,7 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { describeWorkspace, readGitHubRemote } from './repo.js';
+import { describeWorkspace, readOriginRemote } from './repo.js';
 
 let root: string;
 /** A clone: `.git` is a directory at its root. */
@@ -242,7 +242,7 @@ describe('describeWorkspace', () => {
   });
 });
 
-describe('readGitHubRemote', () => {
+describe('readOriginRemote', () => {
   async function withRepo(config: string, run: (root: string) => Promise<void>): Promise<void> {
     const root = await mkdtemp(join(tmpdir(), 'artemis-remote-'));
     try {
@@ -261,27 +261,57 @@ describe('readGitHubRemote', () => {
     ['no .git suffix', 'https://github.com/Rx-Ventures/artemis'],
   ])('reads the origin coordinates from a %s remote', async (_kind, url) => {
     await withRepo(`[core]\n\tbare = false\n[remote "origin"]\n\turl = ${url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`, async (root) => {
-      expect(await readGitHubRemote(root)).toEqual({ owner: 'Rx-Ventures', repo: 'artemis' });
+      expect(await readOriginRemote(root)).toEqual({
+        host: 'github.com',
+        owner: 'Rx-Ventures',
+        repo: 'artemis',
+        kind: 'github',
+        web: 'https://github.com/Rx-Ventures/artemis',
+      });
     });
   });
 
-  it('answers nothing for another host, another remote name, or no repo at all', async () => {
-    // A GitLab origin must not become a github.com link; a repository whose
-    // only remote is `upstream` has no origin to read; a directory with no
-    // .git/config is the ordinary non-repository case.
-    await withRepo('[remote "origin"]\n\turl = https://gitlab.com/o/r.git\n', async (root) => {
-      expect(await readGitHubRemote(root)).toBeUndefined();
+  it('reads an origin on any other host, spelled for that host', async () => {
+    // The case this used to refuse: a self-hosted Forgejo reached over plain
+    // http on a LAN address and port, and a GitLab with nested groups.
+    await withRepo('[remote "origin"]\n\turl = http://100.82.237.80:8300/david/cortex.git\n', async (root) => {
+      expect(await readOriginRemote(root)).toEqual({
+        host: '100.82.237.80:8300',
+        owner: 'david',
+        repo: 'cortex',
+        kind: 'unknown',
+        web: 'http://100.82.237.80:8300/david/cortex',
+      });
     });
+    await withRepo('[remote "origin"]\n\turl = git@gitlab.com:group/sub/r.git\n', async (root) => {
+      expect(await readOriginRemote(root)).toMatchObject({ owner: 'group/sub', repo: 'r', kind: 'gitlab' });
+    });
+  });
+
+  it('lets the repository say what its host runs', async () => {
+    await withRepo('[remote "origin"]\n\turl = https://git.example.com/o/r.git\n[artemis]\n\tforge = gitlab\n', async (root) => {
+      expect((await readOriginRemote(root))?.kind).toBe('gitlab');
+    });
+    // A word this does not know is not a kind; the host's own reading stands.
+    await withRepo('[remote "origin"]\n\turl = https://git.example.com/o/r.git\n[artemis]\n\tforge = svn\n', async (root) => {
+      expect((await readOriginRemote(root))?.kind).toBe('unknown');
+    });
+  });
+
+  it('answers nothing for another remote name, a remote that is no URL, or no repo at all', async () => {
     await withRepo('[remote "upstream"]\n\turl = https://github.com/o/r.git\n', async (root) => {
-      expect(await readGitHubRemote(root)).toBeUndefined();
+      expect(await readOriginRemote(root)).toBeUndefined();
     });
-    expect(await readGitHubRemote(join(tmpdir(), 'artemis-no-such-dir'))).toBeUndefined();
+    await withRepo('[remote "origin"]\n\turl = /srv/git/r.git\n', async (root) => {
+      expect(await readOriginRemote(root)).toBeUndefined();
+    });
+    expect(await readOriginRemote(join(tmpdir(), 'artemis-no-such-dir'))).toBeUndefined();
   });
 
-  it('lands on the describe result for a checkout with a GitHub origin', async () => {
+  it('lands on the describe result for a checkout with an origin', async () => {
     await withRepo('[remote "origin"]\n\turl = git@github.com:owner/repo.git\n', async (root) => {
       const described = await describeWorkspace(root);
-      expect(described.github).toEqual({ owner: 'owner', repo: 'repo' });
+      expect(described.origin).toMatchObject({ owner: 'owner', repo: 'repo', kind: 'github' });
     });
   });
 });

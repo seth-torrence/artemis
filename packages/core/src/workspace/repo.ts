@@ -53,6 +53,8 @@
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 
+import { isForgeKind, parseRemoteUrl, type RepositoryOrigin } from '@rx-artemis/protocol';
+
 import { isTemporaryPath } from './temp.js';
 
 /** Names for one directory. See the module docs for which to prefer. */
@@ -102,12 +104,12 @@ export interface WorkspaceDescription {
    */
   readonly worktree?: boolean;
   /**
-   * The GitHub repository the project's `origin` remote points at, when it
-   * points at one. What lets a bare `#123` in a transcript become a link to
-   * the pull request it names — see {@link readGitHubRemote} for how it is
-   * read and why only GitHub produces an answer.
+   * The repository the project's `origin` remote points at, on whatever host
+   * it points at. What lets a bare `#123` in a transcript become a link to
+   * the pull request it names, spelled the way that host spells one — see
+   * {@link readOriginRemote} for how it is read.
    */
-  readonly github?: { readonly owner: string; readonly repo: string };
+  readonly origin?: RepositoryOrigin;
   /**
    * Is {@link path} inside the machine's temporary directory?
    *
@@ -152,7 +154,7 @@ export async function describeWorkspace(path: unknown): Promise<WorkspaceDescrip
   if (found === undefined) return { path: value, name, ...temporary };
 
   const { repoRoot, worktree, projectRoot } = found;
-  const github = await readGitHubRemote(projectRoot ?? repoRoot);
+  const origin = await readOriginRemote(projectRoot ?? repoRoot);
   return {
     path: value,
     name,
@@ -165,12 +167,12 @@ export async function describeWorkspace(path: unknown): Promise<WorkspaceDescrip
     // these fields existed.
     ...(worktree ? { worktree: true } : {}),
     ...temporary,
-    ...(github === undefined ? {} : { github }),
+    ...(origin === undefined ? {} : { origin }),
   };
 }
 
 /**
- * The `origin` remote's GitHub coordinates, straight out of `.git/config`.
+ * The `origin` remote's repository, straight out of `.git/config`.
  *
  * Read from the file rather than `git remote get-url` for the reasons the
  * module docs give for the whole walk: no `git` on PATH required, no process
@@ -183,13 +185,21 @@ export async function describeWorkspace(path: unknown): Promise<WorkspaceDescrip
  * whose config lives in the superproject's `.git/modules/…` — it degrades to
  * "no remote", which is honest enough for a link decoration.
  *
- * Only `github.com` produces an answer. The consumer turns `#123` into a
- * pull-request URL, and that expansion is a GitHub convention — a GitLab or
- * Gitea origin should produce no links rather than links to the wrong host.
+ * Any host produces an answer — this used to stop at `github.com`, on the
+ * reasoning that `#123` → `/pull/123` is a GitHub convention and a link to
+ * the wrong host is worse than none. Both halves were right and the
+ * conclusion was not: every forge has *a* convention, `parseRemoteUrl` spells
+ * the ones it can name, and a checkout on a Forgejo or a GitLab was getting
+ * dead text for the one spelling people use. Where the host name does not
+ * say what it runs, the repository can, in its own config:
+ *
+ *     [artemis]
+ *         forge = gitlab
+ *
+ * and that word wins over the guess. See `forge.ts` in protocol for the
+ * default a nameless host gets, and why.
  */
-export async function readGitHubRemote(
-  root: string,
-): Promise<{ readonly owner: string; readonly repo: string } | undefined> {
+export async function readOriginRemote(root: string): Promise<RepositoryOrigin | undefined> {
   let config: string;
   try {
     config = await readFile(join(root, '.git', 'config'), 'utf8');
@@ -203,17 +213,12 @@ export async function readGitHubRemote(
   const url = section === undefined ? undefined : /^\s*url\s*=\s*(.+?)\s*$/m.exec(section)?.[1];
   if (url === undefined) return undefined;
 
-  // The three spellings git uses for one GitHub repository:
-  //   https://github.com/owner/repo(.git)
-  //   git@github.com:owner/repo(.git)
-  //   ssh://git@github.com/owner/repo(.git)
-  const match =
-    /^(?:https:\/\/|ssh:\/\/git@|git@)github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(url);
-  if (match === null) return undefined;
+  // The repository's own word on what its host runs, when it has one.
+  const own = /\[artemis\]([^[]*)/.exec(config)?.[1];
+  const said = own === undefined ? undefined : /^\s*forge\s*=\s*(\S+)\s*$/m.exec(own)?.[1]?.toLowerCase();
+  const hint = isForgeKind(said) ? said : undefined;
 
-  const [, owner, repo] = match;
-  if (owner === undefined || repo === undefined) return undefined;
-  return { owner, repo };
+  return parseRemoteUrl(url, hint) ?? undefined;
 }
 
 /** A repository root, and which of the two kinds it is. */
