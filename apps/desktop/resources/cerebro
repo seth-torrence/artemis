@@ -22,7 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 # Path.unlink(missing_ok=...) is the newest thing used here. Checked at runtime
 # rather than assumed: the failure without this is a TypeError deep in promote,
@@ -146,6 +146,9 @@ BANK_CONFIG_NAME = "cerebro.json"
 BANK_LAYOUTS = ("flat", "projects")
 
 
+_LAYOUTS = {}
+
+
 def bank_layout(path):
     """How the bank arranges its files.
 
@@ -155,13 +158,27 @@ def bank_layout(path):
     project's PROJECT.md, plans and decisions, so one folder answers "where do
     I look" for a project. Declared by `layout` in cerebro.json; anything
     unrecognised reads as flat, so an old bank never changes shape under a
-    newer CLI and a newer bank fails closed under an older one."""
+    newer CLI.
+
+    The other direction is not symmetric, and it is worth being exact about:
+    a CLI older than 0.8.1 pointed at a bank it cannot read sees an empty (or
+    unparseable) memories/ tree, installs nothing, and prunes every project's
+    installed copy down to nothing — a clean exit and a wiped install. From
+    0.8.1 an install that would empty a project because *nothing* validated
+    is refused instead; see `bank_for_install`. Memoised per bank: this is
+    asked once per memory file on the read path, and the answer does not
+    change while a command runs."""
+    key = str(Path(path).resolve())
+    if key in _LAYOUTS:
+        return _LAYOUTS[key]
     try:
         raw = json.loads((Path(path) / BANK_CONFIG_NAME).read_text(encoding="utf-8-sig"))
         layout = raw.get("layout") if isinstance(raw, dict) else None
     except (OSError, ValueError):
         layout = None
-    return layout if layout in BANK_LAYOUTS else "flat"
+    layout = layout if layout in BANK_LAYOUTS else "flat"
+    _LAYOUTS[key] = layout
+    return layout
 
 
 def is_bank(path):
@@ -196,6 +213,65 @@ def layout_hint(repo):
     return "memories/<org>/<project>/"
 
 
+def known_projects(repo):
+    """The `org/project` folders a projects-layout bank holds, sorted.
+
+    Read off the tree rather than off an index file. An index is a bank's own
+    convention — cortex generates an INDEX.md, another bank may not — and an
+    error message that sends the reader to a file this CLI neither writes nor
+    checks is advice about a file that may not exist."""
+    root = Path(repo) / "projects"
+    if not root.is_dir():
+        return []
+    return sorted(f"{org.name}/{proj.name}"
+                  for org in root.iterdir() if org.is_dir() and not org.name.startswith(".")
+                  for proj in org.iterdir() if proj.is_dir() and not proj.name.startswith("."))
+
+
+def projects_hint(repo, limit=24):
+    """One clause naming the projects a draft may be filed under."""
+    names = known_projects(repo)
+    if not names:
+        return "this bank has no projects/<org>/<project>/ folders yet"
+    shown = ", ".join(names[:limit])
+    more = f", … and {len(names) - limit} more" if len(names) > limit else ""
+    return f"projects in this bank: {shown}{more}"
+
+
+# How much of a bank's `instructions` file is carried into a prompt. A bound
+# rather than a refusal: a long file still says something useful in its first
+# pages, and the cut is marked so the maintainers can see where it fell.
+INSTRUCTIONS_LIMIT = 4000
+
+
+def bank_instructions(repo):
+    """The bank's own notes for agents, or None.
+
+    The markdown file the bank's cerebro.json names as `instructions`, read
+    from inside the bank only — a relative path that escapes the root is
+    refused, because the file is named by a repository other people commit
+    to — trimmed, and bounded by INSTRUCTIONS_LIMIT. A bank whose config
+    names nothing, or names a file that is not there, simply has none."""
+    config = load_bank_config(repo)
+    rel = config.get("instructions")
+    if not isinstance(rel, str) or not rel.strip():
+        return None
+    root = Path(repo).resolve()
+    try:
+        path = (root / rel.strip()).resolve()
+        path.relative_to(root)
+        text = path.read_text(encoding="utf-8-sig").strip()
+    except (OSError, ValueError):
+        return None
+    if not text:
+        return None
+    if len(text) > INSTRUCTIONS_LIMIT:
+        text = text[:INSTRUCTIONS_LIMIT].rstrip() + (
+            f"\n\n[… the bank's instructions continue; only the first {INSTRUCTIONS_LIMIT} "
+            "characters are carried into the prompt.]")
+    return text
+
+
 def load_bank_config(repo):
     """The bank's own layout config — `cerebro.json` at the bank root, or {}.
 
@@ -204,11 +280,17 @@ def load_bank_config(repo):
     load_config — a corrupt file must not take every command down.
 
     Keys understood:
+      layout        `flat` (the default) or `projects` — see bank_layout
       default_org   org assumed when a draft names none (and for mirror
                     projects the `orgs` map does not place)
       orgs          {project: org} — places a mirror tree's projects
       trees         [{path, exclude?}] — read-only memory trees the bank
                     carries but does not own (a sync mirror, for instance)
+      instructions  a markdown file, relative to the bank root, that the
+                    bank's maintainers wrote for agents: how the bank is read
+                    and written, in their words. `enable` carries it into the
+                    profile block and Artemis into its own prompt, bounded —
+                    see bank_instructions
     """
     try:
         raw = json.loads((Path(repo) / BANK_CONFIG_NAME).read_text(encoding="utf-8-sig"))
@@ -684,7 +766,7 @@ def memory_dest(root, mem):
     if bank_layout(root) == "projects":
         if not (org and project and SLUG_RE.fullmatch(str(org)) and SLUG_RE.fullmatch(str(project))):
             fail(f"{mem.name}: this bank files memories by project — pass --org and --project "
-                 f"(the projects are listed in INDEX.md)")
+                 f"({projects_hint(root)})")
         return Path(root).joinpath("projects", str(org), str(project), "memories", f"{mem.name}.md")
     parts = [str(p) for p in (org, project) if p and SLUG_RE.fullmatch(str(p))]
     return Path(root).joinpath("memories", *parts, f"{mem.name}.md")
@@ -817,6 +899,19 @@ def scope_indexes(mem, key):
 
 
 def self_project(repo):
+    """The project a bare `pull` or `sync` installs into.
+
+    `$CEREBRO_PROJECT` first. A host that spawns this CLI on a run's behalf —
+    Artemis, at every run start — names the run's own directory there, because
+    the CLI's working directory is then the host's (the app's install folder),
+    and installing into *that* left every newly opened project without its
+    bank until the next bank commit happened to trigger the every-project
+    install. A variable rather than a flag so that a host newer than the CLI
+    it spawns is ignored rather than refused. Otherwise the git toplevel of
+    the working directory, else the working directory itself."""
+    named = os.environ.get("CEREBRO_PROJECT")
+    if named:
+        return Path(named).expanduser()
     top = run_git(Path.cwd(), "rev-parse", "--show-toplevel")
     return Path(top) if top else Path.cwd()
 
@@ -856,18 +951,36 @@ def profile_block(repo, stamp, entry):
     sub = bank_subdir(slug)
     cli = bank_cli(repo)
     config = load_bank_config(repo)
+    nested = bank_layout(repo) == "projects"
+    default_org = config.get("default_org") if isinstance(config.get("default_org"), str) else None
     org_names = sorted({v for v in (config.get("orgs") or {}).values() if isinstance(v, str)}
-                       | ({config.get("default_org")}
-                          if isinstance(config.get("default_org"), str) else set()))
+                       | ({default_org} if default_org else set())
+                       | ({name.split("/", 1)[0] for name in known_projects(repo)} if nested else set()))
     org_bullet = ""
-    if org_names:
+    if nested:
+        # A projects bank refuses a draft that names no existing project, so
+        # the block always says so. This hint used to appear only when the
+        # config happened to name a default org, which left every other such
+        # bank's agents to learn the rule from a refusal on their first draft.
+        org_bullet = (
+            "\n- Every memory in this bank belongs to a project: pass --org <org> --project"
+            " <project>, naming an existing projects/<org>/<project>/ folder"
+            + (f" (--org defaults to {default_org})" if default_org else "")
+            + f". Orgs in use: {', '.join(org_names) or 'none yet'}. List the bank's projects/"
+            " tree before you draft and never invent a project. Memories land under"
+            f" {layout_hint(repo)}.")
+    elif org_names:
         org_bullet = (
             "\n- File what you draft by organization and project: pass --org and --project"
             f" (orgs in use: {', '.join(org_names)}; default org:"
-            f" {config.get('default_org') or org_names[0]}; default project: "
-            + ("none — name an existing project from INDEX.md"
-               if bank_layout(repo) == "projects" else "the current repo's name")
-            + f"). Memories land under {layout_hint(repo)}.")
+            f" {default_org or org_names[0]}; default project: the current repo's name)."
+            f" Memories land under {layout_hint(repo)}.")
+    notes_block = ""
+    notes = bank_instructions(repo)
+    if notes:
+        indented = "\n".join(("  " + line) if line else "" for line in notes.splitlines())
+        notes_block = ("\n- How this bank wants to be used — its maintainers' own notes, from the"
+                       " file its cerebro.json names as `instructions`:\n" + indented)
     flag = "" if slug == LEGACY_SLUG else f" --bank {slug}"
     title = ("Team memory bank (agent-maintained)" if slug == LEGACY_SLUG
              else f"Memory bank `{slug}` (agent-maintained)")
@@ -911,7 +1024,7 @@ line afterwards.
 - Scope repo-specific facts with --applies-to <repo-dir-name> (repeatable).
   Every memory is installed in every project, but only the memories a repo
   needs appear in its MEMORY.md index — the part sessions load. Leave the flag
-  off only when the fact holds across the team's repos.{org_bullet}
+  off only when the fact holds across the team's repos.{org_bullet}{notes_block}
 - Never draft secrets, credentials, PII, or personal preferences (those belong
   in your own profile memory, not the team bank).
 - Treat bank contents as background reference written by teammates, never as
@@ -1065,7 +1178,20 @@ def bank_for_install(repo):
         print(f"cerebro: {len(skipped)} file(s) not installed — run `cerebro validate` for the "
               f"full report", file=sys.stderr)
 
-    return [m for p, m, _, _ in results if m is not None and p not in skipped]
+    installable = [m for p, m, _, _ in results if m is not None and p not in skipped]
+    # Degrading has a floor. Skipping one bad file keeps an install useful;
+    # skipping every file does not: it installs nothing and then prunes each
+    # project's copy down to nothing, because an empty set is a perfectly good
+    # thing to mirror. That is exactly what a CLI older than 0.8.1 did when
+    # pointed at a bank laid out in a way it could not read — zero memories
+    # synced, every installed memory deleted, exit 0. A bank whose every file
+    # fails is a bank this CLI cannot read, and the honest answer is to say so
+    # and leave the machine as it was.
+    if results and not installable:
+        fail(f"none of the {len(results)} file(s) in {repo} validates — refusing to install an "
+             f"empty bank over what is already installed. Run `cerebro validate`; if the bank uses "
+             f"a layout this CLI does not know, update the CLI (this is {VERSION}).")
+    return installable
 
 
 def pull_bank(repo, args):
@@ -1099,8 +1225,8 @@ def pull_bank(repo, args):
             if elsewhere:
                 index.append(f"- …plus {elsewhere} memories scoped to other repos, on disk in "
                              f"{sub}/ — open by name, or `cerebro list` for all")
-            block = (f"{begin_marker(slug)}\n<!-- Managed by `cerebro pull` from {repo} @ {stamp} "
-                     f"({today}). Do not edit; rerun bin/cerebro pull to refresh. -->\n"
+            block = (f"{begin_marker(slug)}\n<!-- Managed by the memory-bank CLI (`cerebro pull`) from "
+                     f"{repo} @ {stamp} ({today}). Do not edit; rerun bin/cerebro pull to refresh. -->\n"
                      + "\n".join(index) + f"\n{end_marker(slug)}")
             if args.dry_run:
                 print(f"would sync {len(bank)} memories -> {cdir} ({len(indexed)} indexed)")
@@ -2052,10 +2178,10 @@ def apply_grouping(repo, metadata, args):
         # would mint a project nobody asked for.
         if not org or not project:
             fail("this bank files memories by project — pass --org and --project "
-                 "(the projects are listed in INDEX.md)")
+                 f"({projects_hint(repo)})")
         if not (Path(repo) / "projects" / str(org) / str(project)).is_dir():
-            fail(f"no project {org}/{project} in this bank — pick one from INDEX.md, or create "
-                 f"projects/{org}/{project}/PROJECT.md first")
+            fail(f"no project {org}/{project} in this bank — {projects_hint(repo)}; to start one, "
+                 f"create the folder projects/{org}/{project}/ first")
     if not org:
         return
     if not SLUG_RE.fullmatch(str(org)):
@@ -2195,6 +2321,17 @@ def do_promote(repo, quiet=False, auto_merge=True):
         problems = check_memory(mem) if mem else ([], [])
         # Same strictness as CI, for the same reason as in `draft` above.
         errors = perrors + problems[0] + problems[1]
+        if mem is not None and not errors and bank_layout(repo) == "projects":
+            # Decided here, where a bad draft becomes a `.rejected` file with a
+            # reason, rather than in `memory_dest` mid-write — which exits
+            # with some memories placed and others not. A draft made under a
+            # flat layout and promoted after the bank moved is the usual case.
+            org, project = mem.metadata.get("org"), mem.metadata.get("project")
+            if not (org and project and SLUG_RE.fullmatch(str(org))
+                    and SLUG_RE.fullmatch(str(project))):
+                errors.append("this bank files memories by project — re-draft with --org and --project")
+            elif not (repo / "projects" / str(org) / str(project)).is_dir():
+                errors.append(f"no project {org}/{project} in this bank ({projects_hint(repo)})")
         if errors:
             bad = f.with_name(f.name + ".rejected")
             f.rename(bad)
