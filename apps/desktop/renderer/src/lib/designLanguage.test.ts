@@ -53,15 +53,19 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
  * its swatch carries a `sheet:allow-lift` marker instead, because exempting one
  * line leaves the rest of the file policed and exempting the file does not.
  *
- * The three below the Radix set are not overlays in its sense but are the same
+ * The four below the Radix set are not overlays in its sense but are the same
  * argument: `Transcript` floats a "jump to latest" button over the scrolling
  * column, `WorkingArea` floats a ghost under the cursor while a pane is being
- * dragged, and `SlashCommandMenu` floats over the transcript above the composer.
- * All three are detached from the flow they sit over. The menu is hand-rolled
- * rather than a `popover` precisely because it must *not* take focus — the user
- * is still typing — so it cannot inherit the exception from the primitive.
+ * dragged, `SlashCommandMenu` floats over the transcript above the composer, and
+ * `FindInSession` floats the find bar over the conversation it is searching —
+ * in the flow it would push the transcript down and move the line being read,
+ * which is the opposite of what a find bar is for. All four are detached from
+ * the flow they sit over. The menu is hand-rolled rather than a `popover`
+ * precisely because it must *not* take focus — the user is still typing — so it
+ * cannot inherit the exception from the primitive.
  */
 const MAY_LIFT = new Set([
+  'components/FindInSession.tsx',
   'components/SlashCommandMenu.tsx',
   'components/Transcript.tsx',
   'components/WorkingArea.tsx',
