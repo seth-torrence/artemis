@@ -46,6 +46,7 @@ import {
   attachmentBytes,
   base64Bytes,
   configDirProblem,
+  BUILT_IN_PROMPT_IDS,
   isBuiltInPromptId,
   IMAGE_MEDIA_TYPES,
   isCredentialRoutingEnvKey,
@@ -2535,12 +2536,35 @@ export function validateAgentPromptsSave(raw: unknown): AgentPromptsSaveRequest 
     );
   }
 
+  // Built-ins the user removed. Bounded by how many Artemis ships — a list
+  // longer than that cannot be describing this build's prompts — and each entry
+  // has to name one, for the same reason `builtIn` on a row has to: a
+  // dismissal for a prompt that does not exist is a hand-edit or a bug, and
+  // storing it would let it shadow a prompt a later build ships under that id.
+  const dismissed = optionalStringArray(
+    document['dismissedBuiltIns'],
+    'document.dismissedBuiltIns',
+    BUILT_IN_PROMPT_IDS.length,
+    200,
+  );
+  for (const [index, entry] of (dismissed ?? []).entries()) {
+    if (!isBuiltInPromptId(entry)) {
+      throw new ValidationError(
+        `document.dismissedBuiltIns[${index}]`,
+        'names no prompt this build ships',
+      );
+    }
+  }
+
   return {
     document: {
       version: AGENT_PROMPTS_VERSION,
       prompts: rawPrompts.map((entry, index) =>
         validateAgentPrompt(entry, `document.prompts[${index}]`),
       ),
+      ...(dismissed === undefined || dismissed.length === 0
+        ? {}
+        : { dismissedBuiltIns: dismissed as BuiltInPromptId[] }),
     },
   };
 }
