@@ -96,6 +96,7 @@ import { useHotkeys } from './hooks/useHotkeys';
 import { AppHeader } from './components/AppHeader';
 import { CommandPalette } from './components/CommandPalette';
 import { ErrorSurface } from './components/ErrorSurface';
+import { openFindInSession } from './components/FindInSession';
 import { RunInfoDialog } from './components/RunInfoDialog';
 import { SettingsDialog } from './components/settings';
 import { Sidebar } from './components/Sidebar';
@@ -257,6 +258,15 @@ export function App(): ReactElement {
       togglePalette();
     },
     escape: pressEscape,
+    /*
+     * `!` — fires from inside a text field, and that is the whole point: the
+     * caret lives in the composer, and ⌘F pressed there means "search what I
+     * am reading", exactly as it does in a browser. The bar it opens belongs
+     * to the focused column, and takes the keystrokes from there itself.
+     */
+    '!mod+f': () => {
+      openFindInSession(focusedPane().id);
+    },
     'mod+n': () => newSession(focusedPane()),
     'mod+b': toggleSidebar,
     /*

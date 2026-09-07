@@ -765,6 +765,18 @@
   }
 
   /*
+   * What ⌘F lit up. Painted as ranges by `lib/findHighlight.ts` — no element
+   * carries this, which is why a message can be highlighted without being
+   * re-rendered. Amber rather than beam so a hit is not mistaken for the
+   * selection it can sit inside, and left dark enough that a screenful of them
+   * does not turn the transcript into a page of paint.
+   */
+  ::highlight(artemis-find) {
+    background: color-mix(in oklch, var(--amber) 30%, transparent);
+    color: var(--ink);
+  }
+
+  /*
    * Keyboard focus, for everything that does not style its own.
    *
    * shadcn components manage focus themselves with `focus-visible:ring-*` and
