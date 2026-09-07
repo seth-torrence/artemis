@@ -1398,8 +1398,9 @@ function createEngine(options: EngineOptions): ArtemisEngine {
       // []`, so Artemis runs the sync cycle itself — one spawn, every enabled
       // bank. Started before the run and never awaited: it promotes what the
       // last session drafted and pulls what teammates landed, neither of which
-      // this run may wait on.
-      syncMemoryBanksInBackground();
+      // this run may wait on. The run's directory goes along so the bank is
+      // installed for the project about to start — see the function.
+      syncMemoryBanksInBackground(input.cwd);
 
       // Every enabled bank is attached to the run as a directory it may read.
       // A bank lives outside cwd — a clone in `~/Documents`, typically — so a

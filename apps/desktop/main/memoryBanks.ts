@@ -14,7 +14,8 @@
  *
  * The second decision is that **main owns the locations**. The renderer never
  * names a binary or an arbitrary path; this module resolves banks from the
- * CLI's own registry (`~/.config/cerebro/config.json` — read here, written
+ * CLI's own registry (`~/.config/cerebro/config.json` — read through core's
+ * `memorybanks/registry`, which the headless server reads too, and written
  * only through the CLI) and refuses to run anything that is not a `cerebro`
  * CLI it resolved itself. That is the same rule the terminal keeps ("main
  * chooses the shell"), applied to a subprocess that can write.
@@ -49,7 +50,19 @@ import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import type { MemoryBankCredential, MemoryBankSecrets, ResolvedSecret } from '@rx-artemis/core';
+import {
+  banksOnDisk,
+  describeBanksForPrompt,
+  embeddedCli,
+  isBank,
+  LEGACY_BANK_SLUG,
+  legacyBankRoot,
+  readRegistry,
+  type MemoryBankCredential,
+  type MemoryBankSecrets,
+  type RegistryBank,
+  type ResolvedSecret,
+} from '@rx-artemis/core';
 import type {
   MemoryBankActionResponse,
   MemoryBankAddRequest,
@@ -93,7 +106,10 @@ const log = createLogger('memory-banks');
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 /** The slug whose installs predate multi-bank; the CLI treats it specially. */
-const LEGACY_SLUG = 'cerebro';
+const LEGACY_SLUG = LEGACY_BANK_SLUG;
+
+/** The shape of a bank slug, as the CLI validates it. */
+const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /**
  * Where the single-bank era put the team bank. Still honoured: a machine that
@@ -101,100 +117,19 @@ const LEGACY_SLUG = 'cerebro';
  * read, under the legacy slug, without anything moving on disk.
  */
 export function legacyRoot(): string {
-  const override = process.env['ARTEMIS_CEREBRO_ROOT'];
-  if (override !== undefined && override.length > 0) return override;
-  return join(homedir(), 'Documents', 'cerebro');
+  return legacyBankRoot();
 }
 
-/** A directory is a bank when it holds `memories/` — the CLI's own test. */
-function isBank(path: string): boolean {
-  return existsSync(join(path, 'memories'));
-}
-
-function embeddedCli(bankPath: string): string | null {
-  const cli = join(bankPath, 'bin', 'cerebro');
-  return existsSync(cli) ? cli : null;
-}
-
-/* -------------------------------------------------------------------------- */
-/* The CLI's registry, read-only                                              */
-/* -------------------------------------------------------------------------- */
-
-/**
- * One bank as the CLI's config records it. Mirrors the CLI's own reading —
- * including the pre-multi-bank `{"bank": path}` shape, which reads as one
- * enabled read-write bank under the legacy slug. Reading the file directly
- * (instead of spawning `banks --json`) is what keeps the per-run paths spawn
- * free; every *write* to it goes through the CLI.
+/*
+ * The CLI's registry and each bank's own `cerebro.json` are read by core's
+ * `memorybanks/registry` — the headless server composes the same prompt from
+ * the same files, and one reader is how the two hosts stay in agreement about
+ * what a bank is. Re-exported so this module keeps its public surface (the
+ * tests read the registry parser from here) and so the rule stands: the files
+ * are read here, and written only through the CLI.
  */
-export interface RegistryBank {
-  readonly slug: string;
-  readonly path: string;
-  readonly role: 'readwrite' | 'readonly';
-  readonly enabled: boolean;
-}
-
-export function registryPath(): string {
-  const base = process.env['XDG_CONFIG_HOME'] ?? join(homedir(), '.config');
-  return join(base, 'cerebro', 'config.json');
-}
-
-const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-/** Parse the registry file's text. Pure; the unit under test. */
-export function parseRegistry(text: string): { banks: RegistryBank[]; defaultSlug: string | null } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return { banks: [], defaultSlug: null };
-  }
-  if (typeof parsed !== 'object' || parsed === null) return { banks: [], defaultSlug: null };
-  const config = parsed as Record<string, unknown>;
-
-  const raw = config['banks'];
-  if (!Array.isArray(raw)) {
-    const legacy = config['bank'];
-    if (typeof legacy === 'string' && legacy.length > 0) {
-      return {
-        banks: [{ slug: LEGACY_SLUG, path: legacy, role: 'readwrite', enabled: true }],
-        defaultSlug: LEGACY_SLUG,
-      };
-    }
-    return { banks: [], defaultSlug: null };
-  }
-
-  const banks: RegistryBank[] = [];
-  for (const entry of raw) {
-    if (typeof entry !== 'object' || entry === null) continue;
-    const item = entry as Record<string, unknown>;
-    const slug = item['slug'];
-    const path = item['path'];
-    if (typeof slug !== 'string' || !SLUG_PATTERN.test(slug)) continue;
-    if (typeof path !== 'string' || path.length === 0) continue;
-    banks.push({
-      slug,
-      path,
-      role: item['role'] === 'readonly' ? 'readonly' : 'readwrite',
-      enabled: item['enabled'] !== false,
-    });
-  }
-  const wanted = config['default'];
-  const defaultSlug = banks.some((bank) => bank.slug === wanted)
-    ? (wanted as string)
-    : (banks[0]?.slug ?? null);
-  return { banks, defaultSlug };
-}
-
-function readRegistry(): { banks: RegistryBank[]; defaultSlug: string | null } {
-  let text: string;
-  try {
-    text = readFileSync(registryPath(), 'utf8');
-  } catch {
-    return { banks: [], defaultSlug: null };
-  }
-  return parseRegistry(text);
-}
+export { parseRegistry, registryPath } from '@rx-artemis/core';
+export type { RegistryBank } from '@rx-artemis/core';
 
 /* -------------------------------------------------------------------------- */
 /* CLI resolution                                                             */
@@ -877,15 +812,7 @@ function writeSwitch(enabled: boolean): void {
  * registration in {@link readMemoryBanksStatus} has run.
  */
 export function banksForRun(): RegistryBank[] {
-  const { banks } = readRegistry();
-  if (banks.length > 0) {
-    return banks.filter((bank) => bank.enabled && isBank(bank.path));
-  }
-  const root = legacyRoot();
-  if (isBank(root) && embeddedCli(root) !== null) {
-    return [{ slug: LEGACY_SLUG, path: root, role: 'readwrite', enabled: true }];
-  }
-  return [];
+  return banksOnDisk({ registry: readRegistry(), legacyRoot: legacyRoot() });
 }
 
 /** The precondition for `builtin:cerebro`: something to describe, and a CLI to teach. */
@@ -899,29 +826,19 @@ export function anyBankAvailable(): boolean {
   }
 }
 
-/** The facts the prompt renderer needs, in composition's pure vocabulary. */
+/**
+ * The facts the prompt renderer needs, in composition's pure vocabulary —
+ * each bank's slug, role and CLI, and what its own `cerebro.json` says about
+ * how it is filed. The vendored CLI is the fallback for a bank that embeds
+ * none; core's reader does the rest, so the desktop and the headless server
+ * describe a bank identically.
+ */
 export function promptBanks(): MemoryBankPromptInfo[] {
-  const { defaultSlug } = readRegistry();
-  const banks = banksForRun();
-  /*
-   * A configured default only counts while the bank it names is still here.
-   * Forgetting a bank does not necessarily rewrite the registry's `default`,
-   * and a default naming a bank that is gone would leave every bank
-   * un-defaulted — which the prompt renderer reads as "no primary", so the
-   * name it speaks and the bank it drafts into would both change shape for a
-   * reason the user never chose. Falling through to the first surviving bank
-   * is what makes removal a promotion rather than a hole.
-   */
-  const resolvedDefault =
-    defaultSlug !== null && banks.some((bank) => bank.slug === defaultSlug)
-      ? defaultSlug
-      : (banks[0]?.slug ?? null);
-  return banks.map((bank) => ({
-    slug: bank.slug,
-    isDefault: bank.slug === resolvedDefault,
-    readonly: bank.role === 'readonly',
-    cli: embeddedCli(bank.path) ?? safeResolveCli() ?? 'bin/cerebro',
-  }));
+  return describeBanksForPrompt({
+    registry: readRegistry(),
+    legacyRoot: legacyRoot(),
+    fallbackCli: safeResolveCli(),
+  });
 }
 
 function safeResolveCli(): string | null {
@@ -1548,7 +1465,7 @@ export async function addMemoryBank(request: MemoryBankAddRequest): Promise<Memo
   const path = request.path ?? join(homedir(), 'Documents', request.slug);
   if (request.mode === 'adopt' && !isBank(path)) {
     throw new WorkspaceError(
-      `${path} has no memories/ directory — it is not a bank. Use "create" to start one there.`,
+      `${path} is not a bank — it has no memories/ directory and declares no projects layout in a cerebro.json. Use "create" to start one there.`,
     );
   }
   if (request.mode === 'join' && (request.remote === undefined || request.remote.length === 0)) {
@@ -1800,7 +1717,33 @@ export async function forgetMemoryBank(request: MemoryBankForgetRequest): Promis
 const SYNC_THROTTLE_MS = 60_000;
 
 let lastSyncAt = 0;
+/** The working directory the last sync was told about. See {@link syncDue}. */
+let lastSyncCwd: string | undefined;
 let syncInFlight = false;
+/** A directory that asked while a sync was running, owed a sync of its own. */
+let pendingCwd: string | undefined;
+
+/**
+ * Is a sync worth spawning for this run?
+ *
+ * The throttle exists to stop a burst of runs paying the spawn several times
+ * over — and a burst is usually several runs in the *same* project. A run in a
+ * project the last sync did not know about is the case the throttle must not
+ * swallow: its first session is exactly when the bank has to be installed for
+ * it, and waiting a minute means starting without the team's memory. So the
+ * throttle is per directory: the same directory within the window is skipped,
+ * a different one goes through.
+ *
+ * Pure, so the rule is the unit under test rather than the timers around it.
+ */
+export function syncDue(
+  state: { readonly lastSyncAt: number; readonly lastSyncCwd?: string },
+  cwd: string | undefined,
+  now: number,
+): boolean {
+  if (now - state.lastSyncAt >= SYNC_THROTTLE_MS) return true;
+  return cwd !== undefined && cwd !== state.lastSyncCwd;
+}
 
 /**
  * Run the banks' own sync cycle, in the background, at most once a minute.
@@ -1825,9 +1768,27 @@ let syncInFlight = false;
  *
  * Fire-and-forget, and silent unless it fails. A run must never wait on a
  * memory bank, and must never fail because of one.
+ *
+ * ## Why the run's directory goes along
+ *
+ * The CLI's cycle has a cheap path for a bank whose `HEAD` has not moved: it
+ * checks that *the current project* has the bank installed and installs it
+ * there if not. "The current project" was the CLI's own working directory —
+ * which, spawned from here, is the app's install folder — so a project opened
+ * for the first time got nothing until the next bank commit happened to
+ * trigger the every-project install. `CEREBRO_PROJECT` names the run's
+ * directory instead. An environment variable rather than a flag on purpose: a
+ * bank's embedded CLI may predate this build, and an unknown flag would fail
+ * every sync on that machine, where an unknown variable is simply ignored.
  */
-export function syncMemoryBanksInBackground(): void {
-  if (syncInFlight) return;
+export function syncMemoryBanksInBackground(cwd?: string): void {
+  if (syncInFlight) {
+    // Owed, not dropped: a project that opened while another's sync was
+    // running still needs its install, and the throttle below would otherwise
+    // hold it for a minute. Runs once more when the current sync ends.
+    if (cwd !== undefined && cwd !== lastSyncCwd) pendingCwd = cwd;
+    return;
+  }
   // The switch before the disk checks, because it is the cheaper question and
   // the more important one: a machine that has banks configured but has not
   // said yes must not have drafts promoted or remotes written to by the mere
@@ -1838,8 +1799,9 @@ export function syncMemoryBanksInBackground(): void {
   if (cli === null) return;
 
   const now = Date.now();
-  if (now - lastSyncAt < SYNC_THROTTLE_MS) return;
+  if (!syncDue({ lastSyncAt, lastSyncCwd }, cwd, now)) return;
   lastSyncAt = now;
+  lastSyncCwd = cwd;
   syncInFlight = true;
 
   // 180s: a sync that has to fetch is bounded by the network once per bank,
@@ -1857,7 +1819,10 @@ export function syncMemoryBanksInBackground(): void {
   void bankCredentialEnv()
     .then(async (credentials) => {
       try {
-        return await runCli(cli, ['sync', '--quiet'], 180_000, credentials.env);
+        return await runCli(cli, ['sync', '--quiet'], 180_000, {
+          ...credentials.env,
+          ...(cwd === undefined ? {} : { CEREBRO_PROJECT: cwd }),
+        });
       } finally {
         credentials.dispose();
       }
@@ -1874,5 +1839,8 @@ export function syncMemoryBanksInBackground(): void {
     })
     .finally(() => {
       syncInFlight = false;
+      const next = pendingCwd;
+      pendingCwd = undefined;
+      if (next !== undefined && next !== lastSyncCwd) syncMemoryBanksInBackground(next);
     });
 }
