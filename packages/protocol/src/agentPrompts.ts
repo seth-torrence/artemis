@@ -44,7 +44,9 @@
  * rather than in the stored document — until the user takes one over, which is
  * what {@link AgentPrompt.overridden} records — and they can be *unavailable*,
  * since a prompt about a tool that is not installed on this machine is not
- * injected, however enabled it is.
+ * injected, however enabled it is. They can also be removed, like any other
+ * row; what makes that stick across reads is
+ * {@link AgentPromptsDocument.dismissedBuiltIns}.
  *
  * That last rule is the reason {@link composeAgentPrompts} takes an
  * `availableBuiltIns` set rather than reading anything itself. Whether Cerebro
@@ -191,6 +193,23 @@ export interface AgentPromptsDocument {
    * read first, and the composed text preserves that.
    */
   readonly prompts: readonly AgentPrompt[];
+  /**
+   * Built-ins the user removed from the library.
+   *
+   * A read re-appends any built-in it does not find (see
+   * {@link parseAgentPromptsDocument}), which is right for a library written
+   * before Artemis shipped one and wrong for a user who deleted it on purpose:
+   * without a record of the deletion, the row comes straight back and reads as
+   * the app overruling them. This is that record. An id here is neither
+   * re-appended nor composed; {@link withBuiltInRestored} takes it back out.
+   *
+   * Absent rather than empty when there is nothing to say, so a library that
+   * never removed anything is byte-identical to one written before this field
+   * existed. An older build ignores the field and re-appends the row on its
+   * next save — the row comes back, which is the honest degradation for a
+   * build that has no way to record the removal.
+   */
+  readonly dismissedBuiltIns?: readonly BuiltInPromptId[];
 }
 
 export const AGENT_PROMPTS_VERSION = 1;
@@ -543,8 +562,12 @@ function parsePrompt(value: unknown): AgentPrompt | undefined {
  *    built-in should still meet it, and a read is the only honest place to
  *    introduce one. They land at the end so they never displace what the user
  *    arranged — and because they are then *in* the document, a built-in the
- *    user turned off stays off. That is why the pane disables built-in rows
- *    rather than deleting them: a deleted one would come straight back.
+ *    user turned off stays off. A built-in the user *deleted* stays deleted
+ *    too, by a different route: the pane records the removal in
+ *    `dismissedBuiltIns`, and a dismissed id is the one kind of missing
+ *    built-in this repair leaves missing. Without that record a deleted row
+ *    would come straight back, which is what the pane used to guard against
+ *    by offering no delete at all.
  */
 export function parseAgentPromptsDocument(value: unknown): AgentPromptsDocument {
   if (!isRecord(value)) return defaultAgentPromptsDocument();
@@ -563,12 +586,77 @@ export function parseAgentPromptsDocument(value: unknown): AgentPromptsDocument 
     prompts.push(prompt);
   }
 
+  // A dismissal is only meaningful for a built-in this build ships and the
+  // document does not also carry as a row — a row present wins, since the user
+  // (or a restore) put it there after the removal. Anything else is dropped,
+  // so a hand-edit or an older document cannot leave a dismissal that refers
+  // to nothing.
+  const rawDismissed = Array.isArray(value['dismissedBuiltIns']) ? value['dismissedBuiltIns'] : [];
+  const dismissed: BuiltInPromptId[] = [];
+  for (const entry of rawDismissed) {
+    if (typeof entry !== 'string' || !isBuiltInPromptId(entry)) continue;
+    if (dismissed.includes(entry)) continue;
+    if (prompts.some((prompt) => prompt.builtIn === entry)) continue;
+    dismissed.push(entry);
+  }
+
   for (const id of BUILT_IN_PROMPT_IDS) {
     if (prompts.some((prompt) => prompt.builtIn === id)) continue;
+    if (dismissed.includes(id)) continue;
     prompts.push(defaultBuiltInPrompt(id));
   }
 
-  return { version: AGENT_PROMPTS_VERSION, prompts };
+  return {
+    version: AGENT_PROMPTS_VERSION,
+    prompts,
+    ...(dismissed.length === 0 ? {} : { dismissedBuiltIns: dismissed }),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Removing and restoring a built-in                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The library without one of Artemis's prompts.
+ *
+ * Both halves at once — the row goes and the dismissal is recorded — because
+ * either alone is wrong: a row removed without the record comes back on the
+ * next read, and a record without removing the row describes a library that
+ * still has it. Pure, so the pane, the dev mock and the tests share one
+ * definition of what "delete" means for a built-in.
+ */
+export function withBuiltInRemoved(
+  document: AgentPromptsDocument,
+  id: BuiltInPromptId,
+): AgentPromptsDocument {
+  const dismissed = [...(document.dismissedBuiltIns ?? []).filter((entry) => entry !== id), id];
+  return {
+    ...document,
+    prompts: document.prompts.filter((prompt) => prompt.builtIn !== id),
+    dismissedBuiltIns: dismissed,
+  };
+}
+
+/**
+ * The library with one of Artemis's prompts back, in its shipped state.
+ *
+ * Appended at the end, as a first read would place it, and with the defaults
+ * a first read would give it: whatever the user had done to it before removing
+ * it — an override, a narrowed scope — went with the row. Bringing it back is
+ * meeting it again, not undoing the removal.
+ */
+export function withBuiltInRestored(
+  document: AgentPromptsDocument,
+  id: BuiltInPromptId,
+): AgentPromptsDocument {
+  const dismissed = (document.dismissedBuiltIns ?? []).filter((entry) => entry !== id);
+  const present = document.prompts.some((prompt) => prompt.builtIn === id);
+  return {
+    version: document.version,
+    prompts: present ? document.prompts : [...document.prompts, defaultBuiltInPrompt(id)],
+    ...(dismissed.length === 0 ? {} : { dismissedBuiltIns: dismissed }),
+  };
 }
 
 /* -------------------------------------------------------------------------- */

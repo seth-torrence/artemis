@@ -310,15 +310,29 @@ function toServerModel(input: {
  * and this one is a literal the compiler can keep readonly.
  */
 /**
- * Is this process running as root?
+ * Would Claude Code refuse `--dangerously-skip-permissions` on this host?
+ *
+ * The CLI's own rule, mirrored exactly rather than approximated as "is root":
+ * it exits under root *unless* the process says the sandbox is deliberate.
+ * `IS_SANDBOX=1` is the opt-in for a container whose only user is root — the
+ * shape of every headless deployment of this server — and
+ * `CLAUDE_CODE_BUBBLEWRAP` is what the CLI's own bubblewrap wrapper sets.
+ * Either one and the flag is accepted as root. A server given `IS_SANDBOX=1`
+ * in its environment can therefore serve the mode again, and the catalogue has
+ * to say so, or the wire lies in the other direction: a mode that works,
+ * withheld.
  *
  * `getuid` is absent on Windows, where the question does not arise in this
  * form — a desktop-hosted server there is not "root" in the sense any provider
- * CLI checks for. Absent therefore reads as "no", which is the answer that
- * changes nothing.
+ * CLI checks for. Absent therefore reads as "not refused", which is the answer
+ * that changes nothing.
  */
-function runningAsRoot(): boolean {
-  return typeof process.getuid === 'function' && process.getuid() === 0;
+function hostRefusesBypass(): boolean {
+  const root = typeof process.getuid === 'function' && process.getuid() === 0;
+  if (!root) return false;
+  if (process.env.IS_SANDBOX === '1') return false;
+  if (process.env.CLAUDE_CODE_BUBBLEWRAP) return false;
+  return true;
 }
 
 /**
@@ -340,13 +354,16 @@ function runningAsRoot(): boolean {
  * than from this — so this is the server's half of the answer, and the run
  * itself still fails with the CLI's own reason (carried since 2.4.7) until the
  * picker learns to intersect the two. The lasting fix is not to run the server
- * as root at all, at which point this filter has nothing to remove.
+ * as root at all, at which point this filter has nothing to remove; until then
+ * `IS_SANDBOX=1` in the server's environment is the CLI's own way of saying the
+ * container is the sandbox, and this filter steps aside for it the same way
+ * the CLI does.
  */
 function honourableModes(
   capabilities: Capabilities,
   providerId: ProviderId,
 ): Capabilities {
-  if (providerId !== 'claude' || !runningAsRoot()) return capabilities;
+  if (providerId !== 'claude' || !hostRefusesBypass()) return capabilities;
   if (!capabilities.permissionModes.includes('bypassPermissions')) return capabilities;
   return {
     ...capabilities,

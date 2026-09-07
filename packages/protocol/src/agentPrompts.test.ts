@@ -17,6 +17,7 @@ import {
   BUILT_IN_PROMPT_IDS,
   composeAgentPrompts,
   defaultAgentPromptsDocument,
+  defaultBuiltInPrompt,
   isBuiltInPromptId,
   parseAgentPromptsDocument,
   promptText,
@@ -25,6 +26,8 @@ import {
   scopeCovers,
   type AgentPrompt,
   type BuiltInPromptId,
+  withBuiltInRemoved,
+  withBuiltInRestored,
 } from './agentPrompts.js';
 
 /** A user-authored prompt, `all`-scoped and on, with whatever is overridden. */
@@ -450,6 +453,40 @@ describe('parseAgentPromptsDocument', () => {
     expect(parsed.prompts[0]?.enabled).toBe(false);
   });
 
+  it('leaves a built-in the user removed removed', () => {
+    // The other durable refusal. A row that is absent *and* recorded as
+    // dismissed is the one kind of missing built-in the read does not repair;
+    // without the record the next read would put it back.
+    const parsed = parseAgentPromptsDocument({
+      version: 1,
+      prompts: [prompt()],
+      dismissedBuiltIns: [CEREBRO],
+    });
+    expect(parsed.prompts.map((p) => p.id)).toEqual(['p1']);
+    expect(parsed.dismissedBuiltIns).toEqual([CEREBRO]);
+  });
+
+  it('drops a dismissal that names nothing, or names a row that is present', () => {
+    // An unknown id (a hand-edit, a newer build's prompt) and a duplicate are
+    // noise. A dismissal for a row the document *also* carries is stale — the
+    // row was put back after the removal — and the row wins.
+    const parsed = parseAgentPromptsDocument({
+      version: 1,
+      prompts: [{ id: CEREBRO, name: 'x', builtIn: CEREBRO, enabled: false, scope: { kind: 'all' } }],
+      dismissedBuiltIns: [CEREBRO, CEREBRO, 'builtin:nope', 42],
+    });
+    expect(parsed.prompts).toHaveLength(BUILT_IN_PROMPT_IDS.length);
+    expect(parsed.dismissedBuiltIns).toBeUndefined();
+  });
+
+  it('writes no dismissal field when there is nothing to say', () => {
+    // A library that never removed anything must be byte-identical to one
+    // written before the field existed, which is what keeps the defaults
+    // comparison in the first case of this suite true.
+    const parsed = parseAgentPromptsDocument({ version: 1, prompts: [] });
+    expect(parsed).not.toHaveProperty('dismissedBuiltIns');
+  });
+
   it('discards a body found on a built-in that does not claim an override', () => {
     // The stale-text case: a body left behind by an older build, a bad merge or
     // a hand-edit. Keeping it would make text nobody chose the text the model
@@ -606,5 +643,33 @@ describe('the built-ins Artemis ships', () => {
       expect(entry.enabled).toBe(true);
       expect(entry.scope).toEqual({ kind: 'all' });
     }
+  });
+});
+
+describe('removing and restoring a built-in', () => {
+  it('removes the row and records the dismissal, and a read keeps it gone', () => {
+    const removed = withBuiltInRemoved(defaultAgentPromptsDocument(), CEREBRO);
+    expect(removed.prompts.some((p) => p.builtIn === CEREBRO)).toBe(false);
+    expect(removed.dismissedBuiltIns).toEqual([CEREBRO]);
+    // The round trip a save takes: what lands is what a read would produce.
+    expect(parseAgentPromptsDocument(removed)).toEqual(removed);
+  });
+
+  it('restores it in its shipped state, at the end, and clears the record', () => {
+    const removed = withBuiltInRemoved(
+      { version: 1, prompts: [prompt(), { ...defaultBuiltInPrompt(CEREBRO), enabled: false, overridden: true, markdown: 'Ours.' }] },
+      CEREBRO,
+    );
+    const restored = withBuiltInRestored(removed, CEREBRO);
+    expect(restored.prompts.map((p) => p.id)).toEqual(['p1', CEREBRO]);
+    // Meeting it again, not undoing the removal: the override and the "off"
+    // went with the row.
+    expect(restored.prompts[1]).toEqual(defaultBuiltInPrompt(CEREBRO));
+    expect(restored).not.toHaveProperty('dismissedBuiltIns');
+  });
+
+  it('is a no-op to restore what was never removed', () => {
+    const document = defaultAgentPromptsDocument();
+    expect(withBuiltInRestored(document, CEREBRO)).toEqual(document);
   });
 });
