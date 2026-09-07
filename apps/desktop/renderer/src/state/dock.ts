@@ -126,6 +126,17 @@ export type DockTab =
    * listings. It is the same reason the tasks tab carries a `paneId`.
    */
   | { readonly kind: 'files'; readonly paneId: PaneId }
+  /**
+   * Every document the conversation has made, listed.
+   *
+   * Keyed by pane for the folder browser's reason: it is a view of what a
+   * column's *transcript* holds, and two columns hold two transcripts. Unlike
+   * the preview — which is one artifact, framed — this is the index of all of
+   * them, and the way back to any one of them once it has scrolled out of
+   * sight: a long turn writes twenty documents and the tiles for them are
+   * wherever in the thread the agent made them.
+   */
+  | { readonly kind: 'documents'; readonly paneId: PaneId }
   | { readonly kind: 'terminal'; readonly id: TerminalId }
   /**
    * A page the user opened, drawn by the main process behind this pane.
@@ -176,6 +187,8 @@ export function tabKey(tab: DockTab): string {
       return `file:${tab.id}`;
     case 'files':
       return `files:${tab.paneId}`;
+    case 'documents':
+      return `documents:${tab.paneId}`;
     case 'terminal':
       return `terminal:${tab.id}`;
     case 'browser':
@@ -249,6 +262,16 @@ export interface ShownConversation {
    * arrives here on its own for the dock to reveal.
    */
   readonly filesRequested?: boolean;
+  /**
+   * Whether this column has asked for its documents listed.
+   *
+   * The folder browser's rule, for the folder browser's reason: the list is
+   * only ever a request, never an arrival. A conversation that has made
+   * nothing still has an (empty) list to show, and one that has made twenty
+   * documents announces each of them in the thread as a tile — so nothing
+   * about the count is a reason to put the tab on the strip uninvited.
+   */
+  readonly documentsRequested?: boolean;
 }
 
 /**
@@ -391,7 +414,7 @@ export function shownOwning(
  * surface belongs to a conversation, so the strip walks the conversations in
  * grid order and lays each one's surfaces out together. Within a conversation
  * the old order holds exactly: preview, files, terminals, browsers, the folder
- * browser, tasks, and its opened agents.
+ * browser, the documents list, tasks, and its opened agents.
  *
  * Both orders are *fixed* — the point was never the sequence but that a strip
  * must not reorder itself and move the ✕ the user was aiming at, the same
@@ -498,6 +521,9 @@ export function visibleTabs(
     // is working rather than of what it has done there — and a fixed order so
     // opening one never shifts the other's ✕.
     if (one.filesRequested === true) tabs.push({ kind: 'files', paneId: one.paneId });
+    // Beside the folder browser: both are views of the column's own things
+    // rather than surfaces something opened, and both arrive only by request.
+    if (one.documentsRequested === true) tabs.push({ kind: 'documents', paneId: one.paneId });
     if (one.hasTasks === true && (agentSurfaces || one.tasksRequested === true)) {
       tabs.push({ kind: 'tasks', paneId: one.paneId });
     }
@@ -728,6 +754,7 @@ const EVERY_DOCK_TAB_KIND: Record<DockTab['kind'], true> = {
   preview: true,
   file: true,
   files: true,
+  documents: true,
   terminal: true,
   browser: true,
   tasks: true,

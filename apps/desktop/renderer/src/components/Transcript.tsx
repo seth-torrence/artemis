@@ -164,6 +164,7 @@ import { useActivityGroup, useTranscriptItem, useTranscriptRows } from '../hooks
 import { recallFold, rememberFold } from '../lib/foldMemory';
 import { formatBytes } from '../lib/attachments';
 import { detectArtifact } from '../lib/artifact';
+import { registerRowJumper } from '../lib/rowJump';
 import { detectFileEdit } from '@rx-artemis/transcript';
 import { previewablePath } from '../lib/preview';
 import {
@@ -388,6 +389,37 @@ export function Transcript(): ReactElement {
     lastTop.current = el.scrollTop;
   }, []);
 
+  /**
+   * The way in from outside: the documents list in the dock asks for a row by
+   * id, and this is the one component holding the scroller. See
+   * `lib/rowJump.ts` for why it is a registry rather than a prop.
+   *
+   * Unpins deliberately. Being taken to a row is a request to read it, and a
+   * follower that snapped back to the tail on the next token would have shown
+   * the row for exactly one frame. The jump button is the way back down, and
+   * it is offered for the same reason it is after a manual scroll.
+   */
+  const pane = usePaneRef();
+  useEffect(
+    () =>
+      registerRowJumper(pane.id, (rowId) => {
+        const scroller = scrollRef.current;
+        if (!scroller) return false;
+        const wrapper = scroller.querySelector(
+          `[data-row-id="${rowId.replace(/["\\]/g, '\\$&')}"]`,
+        );
+        const target = wrapper?.firstElementChild;
+        if (!(target instanceof HTMLElement)) return false;
+        pinned.current = false;
+        setShowJump(true);
+        target.scrollIntoView({ block: 'center' });
+        lastTop.current = scroller.scrollTop;
+        flashRow(target);
+        return true;
+      }),
+    [pane],
+  );
+
   return (
     <div className="relative min-h-0 flex-1">
       <div
@@ -447,12 +479,39 @@ export function Transcript(): ReactElement {
 /* Row dispatch                                                               */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Mark a row the reader was just taken to, briefly.
+ *
+ * The Web Animations API rather than a class: the row already carries
+ * `turn-in`'s animation, and a class that set `animation` over it would replay
+ * the entrance when it was removed. A wash of the accent that fades is enough
+ * to answer "which one" without touching the row's own styling. Absent under
+ * jsdom, where nothing is drawn — hence the guard.
+ */
+function flashRow(row: HTMLElement): void {
+  if (typeof row.animate !== 'function') return;
+  row.animate(
+    [
+      { backgroundColor: 'color-mix(in oklab, var(--color-beam) 22%, transparent)' },
+      { backgroundColor: 'transparent' },
+    ],
+    { duration: 1400, easing: 'ease-out' },
+  );
+}
+
 const Row = memo(function Row({ id }: { readonly id: string }): ReactElement | null {
   // A group id names a fold of several tool calls rather than one item, and
   // subscribes to a different slice of the model. Splitting before the item
   // lookup keeps `ItemRow` on the single-id subscription that rule 2 requires.
-  if (isGroupId(id)) return <ActivityRow id={id} />;
-  return <ItemRow id={id} />;
+  //
+  // The wrapper has no box — `display: contents` leaves the `Line` inside it
+  // as the flex item the column spaces — and exists so a row can be found by
+  // id from outside the list. See `lib/rowJump.ts`.
+  return (
+    <div data-row-id={id} className="contents">
+      {isGroupId(id) ? <ActivityRow id={id} /> : <ItemRow id={id} />}
+    </div>
+  );
 });
 
 const ItemRow = memo(function ItemRow({ id }: { readonly id: string }): ReactElement | null {

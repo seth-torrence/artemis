@@ -253,7 +253,7 @@ export type TranscriptItem =
  * that could only be reached by opening one. The rule now is simply: prose and
  * reasoning read top to bottom, and the work is underneath.
  *
- * ## An artifact is never folded
+ * ## An artifact is never folded — and it does not sink
  *
  * One kind of call is lifted out of the burst rather than hidden inside it: one
  * that produced an artifact ({@link ArtifactTest}). The marker exists to hide
@@ -262,26 +262,40 @@ export type TranscriptItem =
  * work rather than of the thing the work produced, and reaching it costs a click
  * into a dropdown whose label gives no hint anything is in there worth opening.
  *
- * Lifted, **not** treated as a boundary. An artifact does not end the run and
- * does not start a new one — the burst is walked to its natural end and only
- * then split into what stays folded and what comes out. So a turn that writes
- * three artifacts among its work reads
+ * Nor does it go to the foot with the calls. The calls sink because they are
+ * the account of *how*; a document is part of *what* was said, and it stands in
+ * the thread at the point the agent made it, exactly as a thinking block does —
+ * the sentence that announced it above, the sentence that followed below. The
+ * tiles used to come out under the marker, and in a long turn that put every
+ * one of them at the foot of the conversation with each new paragraph landing
+ * *above* the lot: twenty documents were twenty tiles the reader had to scroll
+ * back past to find the words, for as long as the turn ran. So a turn that
+ * writes two documents among its work reads
  *
- *     ▸ work · Ran 4 commands, edited 2 files
+ *     ▸ I'll write the report first.
  *     ▤ report.html                              [ Open ]
+ *     ▸ And a chart to go with it.
  *     ▤ chart.svg                                [ Open ]
- *     ▤ notes.md                                 [ Open ]
+ *     ▸ work · Ran 4 commands, edited 2 files
  *
- * — one folded line, with the things worth opening beside it. Ending the run at
- * each artifact instead would be the obvious implementation and the wrong one:
- * it turns a single burst into a marker per gap, so the more the agent made, the
- * more machinery rows the reader has to scroll past to see it.
+ * — the things worth opening where they were made, and one folded line for the
+ * rest. Lifted, **not** treated as a boundary: an artifact does not end the run
+ * and does not start a new one, so the calls either side of a tile are still
+ * one marker. Ending the run at each artifact instead would be the obvious
+ * implementation and the wrong one: it turns a single burst into a marker per
+ * gap, so the more the agent made, the more machinery rows the reader has to
+ * scroll past to see it.
  *
  * A lifted call is not a member of the group, so the summary does not count it
  * either. "Edited 5 files" beside five tiles that *are* those files would be the
  * same work reported twice, and the marker's job is to describe what is still
  * hidden. A burst whose only calls were artifacts therefore has nothing left to
  * summarise and produces no marker at all.
+ *
+ * The lifted calls are also kept as a list of their own — {@link
+ * TranscriptModel.getArtifactsSnapshot} — so a surface that wants every
+ * document of a conversation can have it without walking the items and
+ * re-parsing each call's arguments to find out which ones qualified.
  *
  * ## Why this is computed here and not in the component
  *
@@ -472,6 +486,12 @@ export class TranscriptModel {
    * instead of a scan.
    */
   private rowsSnapshot: readonly string[] = EMPTY_IDS;
+  /**
+   * The calls that made artifacts, in transcript order. Gathered by the same
+   * walk that builds {@link rowsSnapshot}, and reference-stable on the same
+   * terms: a new identity only when the set changes.
+   */
+  private artifactsSnapshot: readonly string[] = EMPTY_IDS;
   private groupMembers = new Map<string, readonly string[]>();
   private groupOf = new Map<string, string>();
   private groupSnapshots = new Map<string, ActivityGroup>();
@@ -584,6 +604,19 @@ export class TranscriptModel {
    * render.
    */
   getRowsSnapshot = (): readonly string[] => this.rowsSnapshot;
+
+  /**
+   * Stable array of the tool calls that made artifacts, in transcript order.
+   *
+   * Ids and not items, for the reason the rows are ids: whoever draws one
+   * subscribes to it by id and is told when *it* changes. This array changes
+   * identity on the same beat as {@link getRowsSnapshot} — a structural change,
+   * never a token — and only when the set of artifacts actually moved, so a
+   * subscriber reading its length is notified when a document arrives and not
+   * otherwise. The verdicts behind it are the memoised ones {@link rebuildRows}
+   * takes anyway; nothing is re-parsed to produce this.
+   */
+  getArtifactsSnapshot = (): readonly string[] => this.artifactsSnapshot;
 
   /** Stable snapshot of one item. New identity only when that item changed. */
   getItem = (id: string): TranscriptItem | undefined => this.items.get(id);
@@ -846,6 +879,7 @@ export class TranscriptModel {
     this.ids = [];
     this.items = new Map();
     this.rowsSnapshot = EMPTY_IDS;
+    this.artifactsSnapshot = EMPTY_IDS;
     this.groupMembers = new Map();
     this.groupOf = new Map();
     this.groupSnapshots = new Map();
@@ -1189,7 +1223,9 @@ export class TranscriptModel {
      * clause repeated in six `apply` cases and forgotten in the seventh. Tool
      * calls are the exception because they do not stand in the thread: they sink
      * to the marker at the foot of the run, which leaves the blocks either side
-     * of them adjacent on screen.
+     * of them adjacent on screen. The one call that does stand — an artifact —
+     * is not known to be one until it finishes, so `replace` ends the streak
+     * for it when the verdict lands.
      */
     if (item.kind !== 'thinking' && item.kind !== 'tool') this.thinkingStreak = null;
     // Anything the *agent* put here counts as the run having produced
@@ -1217,7 +1253,17 @@ export class TranscriptModel {
     if (item.kind === 'tool') this.artifactVerdicts.delete(id);
 
     this.items.set(id, item);
-    if (item.kind === 'tool' && this.isArtifact(id) !== wasArtifact) this.structural = true;
+    if (item.kind === 'tool' && this.isArtifact(id) !== wasArtifact) {
+      this.structural = true;
+      // A tile stands in the thread, so the reasoning after it is a new
+      // stretch. `insert` lets a tool call through the streak because a call
+      // sinks to the marker and the blocks either side of it stay neighbours
+      // on screen; a call that turns out to be an artifact does not sink, and
+      // the blocks either side of it are not neighbours any more. Broken here
+      // rather than at `tool.start` because that is where the verdict is
+      // taken, and the block that would join the streak arrives after it.
+      if (!wasArtifact) this.thinkingStreak = null;
+    }
 
     this.index(item);
     this.dirty.add(id);
@@ -1267,13 +1313,21 @@ export class TranscriptModel {
      * {@link ActivityGroup}. So a thinking block is an ordinary row here, in the
      * position it arrived in, and the marker below holds only calls.
      *
+     * Neither does an artifact. A call that made something is the thing the
+     * turn produced rather than the mechanism, and it stands where it was made
+     * — the calls around it still sink, so the marker at the foot is the one
+     * line for the machinery and the tiles are wherever the agent put them.
+     * They used to come out under the marker, which in a long turn stacked
+     * every tile at the foot of the conversation with each new paragraph
+     * arriving above the lot; see {@link ActivityGroup}.
+     *
      * A run's boundary is its `run-end` row — or, in a session read back from
      * disk, the next thing the user said, because stored history has no
      * `run-end` in it at all. The tail after the last boundary is the run in
      * flight, which is why the flush happens on those rows and once at the end.
      */
     let machinery: string[] = [];
-    let lifted: string[] = [];
+    const artifacts: string[] = [];
 
     const flush = (): void => {
       const first = machinery[0];
@@ -1286,19 +1340,19 @@ export class TranscriptModel {
         members.set(groupId, machinery);
         rows.push(groupId);
       }
-      // Below the marker: the tiles are the reason anyone opens this stretch,
-      // so they come out under the one line that describes the work.
-      for (const artifactId of lifted) rows.push(artifactId);
       machinery = [];
-      lifted = [];
     };
 
     for (const id of this.ids) {
       if (id === undefined) continue;
 
       if (this.isMachinery(id)) {
-        if (this.isArtifact(id)) lifted.push(id);
-        else machinery.push(id);
+        if (this.isArtifact(id)) {
+          artifacts.push(id);
+          rows.push(id);
+        } else {
+          machinery.push(id);
+        }
         continue;
       }
 
@@ -1369,6 +1423,11 @@ export class TranscriptModel {
     this.groupMembers = members;
     this.groupOf = groupOf;
     this.rowsSnapshot = rows.length === 0 ? EMPTY_IDS : rows.slice();
+    // Kept only when it moved, so a subscriber comparing identities is told
+    // about a new document and not about every row that arrived beside one.
+    if (!sameIds(artifacts, this.artifactsSnapshot)) {
+      this.artifactsSnapshot = artifacts.length === 0 ? EMPTY_IDS : artifacts;
+    }
   }
 
   /**
