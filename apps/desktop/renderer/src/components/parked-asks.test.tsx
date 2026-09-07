@@ -19,6 +19,9 @@
  *  - Every kind of ask is pinned — a question, an approval, a plan — and
  *    several at once are several pins, in arrival order.
  *  - The marker's button lands focus on the pinned card.
+ *  - The strip minimises to its summary line and comes back, keeps its count
+ *    when another request lands, opens on the way to a card the marker names,
+ *    and forgets the whole thing once the queue is empty.
  *
  * The bridge is faked at `window.artemis`, as the card tests do, so the answer
  * goes through the real store: the real `respondToPermission`, the real queue
@@ -32,6 +35,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { IpcResult, PermissionDecision, PermissionRequest } from '@rx-artemis/protocol';
 
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { forgetParkedAsks } from '@/components/ParkedAsks';
 import { forgetFolds } from '@/lib/foldMemory';
 
 class NoopObserver {
@@ -201,6 +205,7 @@ beforeEach(() => {
   sent = [];
   respond = (decision) => ({ ok: true, value: { requestId: 'perm-1' } });
   forgetFolds();
+  forgetParkedAsks();
   resetRunStreamState();
   appTranscript().reset();
   setUp();
@@ -314,5 +319,67 @@ describe('the transcript row', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Answer below' }));
     expect(document.activeElement).toBe(card());
+  });
+});
+
+describe('minimising', () => {
+  const hide = (): void => fireEvent.click(screen.getByRole('button', { name: 'Hide' }));
+
+  it('leaves a line that still says what is waiting, and brings the card back', () => {
+    park(QUESTION, 1);
+    mount(<Composer />);
+    hide();
+    // The card is gone — that is the point, the transcript gets the room…
+    expect(screen.queryByRole('radio', { name: /date-fns/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send answer' })).toBeNull();
+    // …and the fact that something is waiting is not.
+    expect(screen.getByRole('region', { name: 'Waiting for your answer' })).toBeTruthy();
+    expect(screen.getByText('A question is waiting for your answer.')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show' }));
+    expect(screen.getByRole('radio', { name: /date-fns/ })).toBeTruthy();
+  });
+
+  it('says what kind of ask is minimised, and counts several', () => {
+    park(APPROVAL, 1);
+    mount(<Composer />);
+    hide();
+    expect(screen.getByText('A tool call is waiting for your approval.')).toBeTruthy();
+
+    // An arrival does not force it open — someone reading back has not changed
+    // their mind — but the line says there are two now.
+    park(QUESTION, 2);
+    expect(screen.queryByRole('radio', { name: /date-fns/ })).toBeNull();
+    expect(screen.getByText('2 requests are waiting for your answer.')).toBeTruthy();
+  });
+
+  it('opens on the way to the card the marker names', () => {
+    park(QUESTION, 1);
+    park(APPROVAL, 2);
+    mount(
+      <>
+        <Transcript />
+        <Composer />
+      </>,
+    );
+    hide();
+    // The first marker, with two cards about to mount: every card focuses
+    // itself on arrival, so this asserts the one that was asked for wins.
+    fireEvent.click(screen.getAllByRole('button', { name: 'Answer below' })[0]!);
+    expect(screen.getByRole('radio', { name: /date-fns/ })).toBeTruthy();
+    expect(document.activeElement).toBe(card());
+  });
+
+  it('forgets it once there is nothing left to answer', () => {
+    park(QUESTION, 1);
+    mount(<Composer />);
+    hide();
+    act(() => {
+      seedApp({ permissionQueue: [] });
+    });
+    // Minimising was about the ask in front of you, not a preference.
+    park(APPROVAL, 2);
+    expect(screen.getByText(/rm -rf build/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Hide' })).toBeTruthy();
   });
 });
