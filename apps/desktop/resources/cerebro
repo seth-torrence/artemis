@@ -168,6 +168,17 @@ def bank_layout(path):
     is refused instead; see `bank_for_install`. Memoised per bank: this is
     asked once per memory file on the read path, and the answer does not
     change while a command runs."""
+    return declared_layout(path) if declared_layout(path) in BANK_LAYOUTS else "flat"
+
+
+def declared_layout(path):
+    """The `layout` the bank's cerebro.json names, verbatim — None when it
+    names none. `bank_layout` folds an unknown value into `flat`, which is
+    right for reading; `bank_for_install` asks for the raw value so that a
+    bank laid out in a way this CLI has never heard of is refused rather than
+    read as an empty flat bank. Memoised per bank — asked once per memory
+    file on the read path, and the answer does not change while a command
+    runs."""
     key = str(Path(path).resolve())
     if key in _LAYOUTS:
         return _LAYOUTS[key]
@@ -176,7 +187,6 @@ def bank_layout(path):
         layout = raw.get("layout") if isinstance(raw, dict) else None
     except (OSError, ValueError):
         layout = None
-    layout = layout if layout in BANK_LAYOUTS else "flat"
     _LAYOUTS[key] = layout
     return layout
 
@@ -1184,9 +1194,17 @@ def bank_for_install(repo):
     # project's copy down to nothing, because an empty set is a perfectly good
     # thing to mirror. That is exactly what a CLI older than 0.8.1 did when
     # pointed at a bank laid out in a way it could not read — zero memories
-    # synced, every installed memory deleted, exit 0. A bank whose every file
-    # fails is a bank this CLI cannot read, and the honest answer is to say so
-    # and leave the machine as it was.
+    # synced, every installed memory deleted, exit 0. Two shapes of that, and
+    # both are refused here: a bank that declares a layout this CLI has never
+    # heard of (its files may be anywhere, and reading it as flat finds
+    # nothing), and a bank whose every file fails to validate. Either is a
+    # bank this CLI cannot read, and the honest answer is to say so and leave
+    # the machine as it was.
+    declared = declared_layout(repo)
+    if declared is not None and declared not in BANK_LAYOUTS:
+        fail(f"{repo} declares layout {declared!r} in {BANK_CONFIG_NAME}, which this CLI ({VERSION}) "
+             f"does not know — refusing to install from a bank it cannot read. Update the CLI "
+             f"(the bank's own bin/cerebro, if it carries one) before syncing.")
     if results and not installable:
         fail(f"none of the {len(results)} file(s) in {repo} validates — refusing to install an "
              f"empty bank over what is already installed. Run `cerebro validate`; if the bank uses "
