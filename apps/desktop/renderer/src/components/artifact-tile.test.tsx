@@ -167,6 +167,44 @@ function openTheMarker(): void {
   fireEvent.click(screen.getByText(/^(Edited|Wrote|Read|Ran)/i));
 }
 
+/**
+ * The agent saying something, settled — the row a tile stands between.
+ *
+ * Streamed and then completed, which is two events for the two sequence slots
+ * every helper here takes: a single event would leave a hole in `seq`, and
+ * the model would rightly add a "dropped in transit" notice to the thread.
+ */
+async function said(runId: string, messageId: string, text: string): Promise<void> {
+  seq += 1;
+  await act(async () => {
+    handleAgentEvent({
+      type: 'text.delta',
+      runId,
+      seq: seq * 2,
+      ts: seq,
+      messageId,
+      blockIndex: 0,
+      text,
+    } as AgentEvent);
+    handleAgentEvent({
+      type: 'text.complete',
+      runId,
+      seq: seq * 2 + 1,
+      ts: seq,
+      messageId,
+      blockIndex: 0,
+      role: 'assistant',
+      text,
+    } as AgentEvent);
+    focusedPane().transcript.flush();
+  });
+}
+
+/** Is `later` after `earlier` in the document? */
+function follows(earlier: Element, later: Element): boolean {
+  return (earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+}
+
 /** A tool call that is not an artifact, to bury a tile in if one folded. */
 async function ranACommand(runId: string): Promise<void> {
   const id = `c${(seq += 1)}`;
@@ -325,6 +363,30 @@ describe('the artifact tile', () => {
     expect(screen.queryByText('Bash')).toBeNull();
     openTheMarker();
     expect(screen.getAllByText('Bash').length).toBe(2);
+  });
+
+  /*
+   * Where the tile stands. The tiles used to come out under the marker at the
+   * foot of the run, which in a long turn put every one of them at the bottom
+   * of the conversation with each new paragraph arriving *above* the stack —
+   * twenty documents were twenty tiles to scroll back past to find the words.
+   */
+  it('stands where it was made, between the sentence before and the one after', async () => {
+    await said(RUN, 'm1', 'the report first');
+    await wrote(RUN, '/tmp/report.html');
+    await said(RUN, 'm2', 'and that is that');
+    await ranACommand(RUN);
+    mount();
+
+    const before = screen.getByText('the report first');
+    const tile = screen.getByText('report.html');
+    const after = screen.getByText('and that is that');
+    const marker = screen.getByText(/^Ran (a|1) command/i);
+    expect(follows(before, tile)).toBe(true);
+    expect(follows(tile, after)).toBe(true);
+    // The machinery still sinks: the one command is a marker at the foot,
+    // below everything the agent said and made.
+    expect(follows(after, marker)).toBe(true);
   });
 
   it('leaves an ordinary tool row for a page written into the project', async () => {

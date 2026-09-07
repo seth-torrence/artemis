@@ -889,15 +889,16 @@ describe('TranscriptModel artifacts', () => {
       model.apply(event);
     }
 
-    // One marker for both commands, then the tile. Not marker/tile/marker.
-    expect(model.getRowsSnapshot()).toEqual(['g:t:c1', 't:c2']);
+    // The tile where it was made, and one marker for both commands at the
+    // foot. Not marker/tile/marker.
+    expect(model.getRowsSnapshot()).toEqual(['t:c2', 'g:t:c1']);
     const group = model.getGroup('g:t:c1');
     expect(group?.ids).toEqual(['t:c1', 't:c3']);
     // The lifted call is not a member, so the summary does not claim it too.
     expect(group?.counts).toEqual({ command: 2 });
   });
 
-  it('keeps every artifact of a long burst, in order', () => {
+  it('keeps every artifact of a long burst, in order, where it was made', () => {
     const model = withArtifacts();
     for (const event of stream(
       ...call('c1', 'Bash'),
@@ -911,11 +912,74 @@ describe('TranscriptModel artifacts', () => {
       model.apply(event);
     }
 
-    // The reasoning stays in the thread in the order the model wrote it — one
-    // row, since the agent said nothing between the three blocks; the marker and
-    // its tiles land beneath the lot, and the tiles are still in the order they
-    // were made rather than interleaved with the reasoning.
-    expect(model.getRowsSnapshot()).toEqual(['k:m1:0', 'g:t:c1', 't:c2', 't:c3', 't:c4']);
+    // The reasoning and the tiles read in the order the model produced them:
+    // each thought, then the thing it made. A tile stands in the thread, so it
+    // ends the stretch of reasoning the way an answer does — three rows here,
+    // not one merged block with the three tiles parked under it. Only the
+    // command sinks, to a marker at the foot.
+    expect(model.getRowsSnapshot()).toEqual([
+      'k:m1:0',
+      't:c2',
+      'k:m1:1',
+      't:c3',
+      'k:m1:2',
+      't:c4',
+      'g:t:c1',
+    ]);
+    expect(model.getItem('k:m1:1')).toMatchObject({ kind: 'thinking', text: 'now the svg' });
+    expect(model.getGroup('g:t:c1')?.ids).toEqual(['t:c1']);
+  });
+
+  it('stands where it was made, so what the agent says next lands below it', () => {
+    /*
+     * The shape that was reported: a long turn writing document after document,
+     * each announced in a sentence. The tiles used to collect at the foot of
+     * the run, under the marker, so every new sentence arrived *above* the
+     * growing stack — the reader was always scrolling back past the documents
+     * to find the words about them.
+     */
+    const model = withArtifacts();
+    for (const event of stream(
+      { type: 'text.complete', messageId: 'm1', role: 'assistant', text: 'the report first' },
+      ...call('c1', 'Write', { file_path: '/tmp/report.md' }),
+      { type: 'text.complete', messageId: 'm2', role: 'assistant', text: 'now a chart' },
+      ...call('c2', 'Bash'),
+      ...call('c3', 'Write', { file_path: '/tmp/chart.svg' }),
+      { type: 'text.complete', messageId: 'm3', role: 'assistant', text: 'both done' },
+    )) {
+      model.apply(event);
+    }
+
+    // Sentence, tile, sentence, tile, sentence — and the one command at the
+    // foot, where the machinery goes.
+    expect(model.getRowsSnapshot()).toEqual([
+      'a:m1:0',
+      't:c1',
+      'a:m2:0',
+      't:c3',
+      'a:m3:0',
+      'g:t:c2',
+    ]);
+  });
+
+  it('does not move a tile when the calls around it keep coming', () => {
+    // A live run: the marker at the foot grows with every command, and a tile
+    // already on screen has to hold its place above it rather than sink with
+    // the work that follows it.
+    const model = withArtifacts();
+    for (const event of stream(
+      ...call('c1', 'Write', { file_path: '/tmp/a.html' }),
+      ...call('c2', 'Bash'),
+    )) {
+      model.apply(event);
+    }
+    expect(model.getRowsSnapshot()).toEqual(['t:c1', 'g:t:c2']);
+
+    model.apply({ type: 'tool.start', runId: RUN, seq: 4, ts: 1004, toolCallId: 'c3', name: 'Bash', input: {} });
+    model.flush();
+
+    expect(model.getRowsSnapshot()).toEqual(['t:c1', 'g:t:c2']);
+    expect(model.getGroup('g:t:c2')?.ids).toEqual(['t:c2', 't:c3']);
   });
 
   it('produces no marker when the burst was nothing but artifacts', () => {
@@ -949,8 +1013,91 @@ describe('TranscriptModel artifacts', () => {
     model.apply({ type: 'tool.end', runId: RUN, seq: 3, ts: 1003, toolCallId: 'c2', status: 'ok' });
     model.flush();
 
-    // `tool.end` is the verdict, and it has to restructure the rows to show it.
-    expect(model.getRowsSnapshot()).toEqual(['g:t:c1', 't:c2']);
+    // `tool.end` is the verdict, and it has to restructure the rows to show it:
+    // the call leaves the marker and stands where it happened, above it.
+    expect(model.getRowsSnapshot()).toEqual(['t:c2', 'g:t:c1']);
+  });
+
+  /*
+   * The list a surface reads to show every document of a conversation — the
+   * same verdicts the rows are built from, kept as ids so nothing has to be
+   * re-parsed to find them, and stable so a subscriber reading its length is
+   * told about a document and not about a token.
+   */
+  describe('the artifacts snapshot', () => {
+    it('lists the calls that made something, in the order they were made', () => {
+      const model = withArtifacts();
+      for (const event of stream(
+        ...call('c1', 'Bash'),
+        ...call('c2', 'Write', { file_path: '/tmp/a.html' }),
+        { type: 'text.complete', messageId: 'm1', role: 'assistant', text: 'one down' },
+        ...call('c3', 'Write', { file_path: '/tmp/b.md' }),
+      )) {
+        model.apply(event);
+      }
+
+      expect(model.getArtifactsSnapshot()).toEqual(['t:c2', 't:c3']);
+    });
+
+    it('is empty with no test installed, and empty again after a reset', () => {
+      const bare = build();
+      for (const event of stream(...call('c1', 'Write', { file_path: '/tmp/a.html' }))) {
+        bare.apply(event);
+      }
+      expect(bare.getArtifactsSnapshot()).toEqual([]);
+
+      const model = withArtifacts();
+      for (const event of stream(...call('c1', 'Write', { file_path: '/tmp/a.html' }))) {
+        model.apply(event);
+      }
+      expect(model.getArtifactsSnapshot()).toEqual(['t:c1']);
+      model.reset();
+      model.flush();
+      expect(model.getArtifactsSnapshot()).toEqual([]);
+    });
+
+    it('keeps its identity until the set of artifacts moves', () => {
+      const model = withArtifacts();
+      for (const event of stream(...call('c1', 'Write', { file_path: '/tmp/a.html' }))) {
+        model.apply(event);
+      }
+      const before = model.getArtifactsSnapshot();
+      expect(before).toEqual(['t:c1']);
+
+      // A token, a command starting and the command finishing: three flushes,
+      // two of them structural, none of them a new document.
+      model.apply({ type: 'text.delta', runId: RUN, seq: 2, ts: 1002, messageId: 'm1', blockIndex: 0, text: 'hi' });
+      model.apply({ type: 'tool.start', runId: RUN, seq: 3, ts: 1003, toolCallId: 'c2', name: 'Bash', input: {} });
+      model.apply({ type: 'tool.end', runId: RUN, seq: 4, ts: 1004, toolCallId: 'c2', status: 'ok' });
+      model.flush();
+      expect(model.getArtifactsSnapshot()).toBe(before);
+
+      // A write that is still running is not yet a document.
+      model.apply({ type: 'tool.start', runId: RUN, seq: 5, ts: 1005, toolCallId: 'c3', name: 'Write', input: { file_path: '/tmp/b.html' } });
+      model.flush();
+      expect(model.getArtifactsSnapshot()).toBe(before);
+
+      // Its finishing is.
+      model.apply({ type: 'tool.end', runId: RUN, seq: 6, ts: 1006, toolCallId: 'c3', status: 'ok' });
+      model.flush();
+      expect(model.getArtifactsSnapshot()).toEqual(['t:c1', 't:c3']);
+    });
+
+    it('drops what a rewind took with it', () => {
+      const model = withArtifacts();
+      for (const event of stream(
+        ...call('c1', 'Write', { file_path: '/tmp/a.html' }),
+        { type: 'text.complete', messageId: 'u2', role: 'user', text: 'again', replay: true },
+        ...call('c2', 'Write', { file_path: '/tmp/b.html' }),
+      )) {
+        model.apply(event);
+      }
+      expect(model.getArtifactsSnapshot()).toEqual(['t:c1', 't:c2']);
+
+      model.truncateFrom('u:1');
+      model.flush();
+      expect(model.getArtifactsSnapshot()).toEqual(['t:c1']);
+    });
   });
 
   it('folds exactly as before when no test is installed', () => {
