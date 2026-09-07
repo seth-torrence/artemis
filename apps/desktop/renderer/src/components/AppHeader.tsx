@@ -20,6 +20,25 @@
  * what centres the search on the window rather than on the leftovers. This is
  * round seven's frame (docs/design/7d-full.html), landed 2026-08-30.
  *
+ * ## The sides never give up room for their own controls; the search does
+ *
+ * A zero basis means flexbox hands each side half of what the search leaves,
+ * with no regard for what the side holds — and with `min-w-0` a side could be
+ * narrower than its contents, which then spilled out of it. The right group
+ * packs to its end, so its spill went *leftwards*, and an update chip beside
+ * a waiting badge painted straight over the search field on any window under
+ * about 1400px. Both sides are `min-w-fit` now: a side is never narrower than
+ * the controls in it, so when the three do not fit it is the search — the one
+ * of them with a keyboard shortcut — that gives up width, and it is `min-w-0`
+ * so it can. With room to spare nothing changes: the two sides still grow
+ * equally from zero, and the search stays centred on the window.
+ *
+ * The one thing that has to stay out of a side's minimum is the title, or the
+ * left group would demand the width of the longest session name and never
+ * truncate again. `contain-inline-size` on the `h1` makes its intrinsic width
+ * zero, so it contributes nothing to what the side asks for and takes whatever
+ * the side is left with.
+ *
  * ## This bar replaced the title bar rather than sitting under it
  *
  * `main/window.ts` hides the platform's title bar, so what is drawn here is the
@@ -332,8 +351,12 @@ export function AppHeader(): ReactElement {
         Now the control has one home at a time. Open, it is the chevron on the
         list's own caption; closed, it is this button, in the one strip that
         never disappears. `⌘B` works in both states either way.
+
+        `min-w-fit`, not `min-w-0`: the side is never narrower than the
+        controls in it — see the header note. The title is kept out of that
+        minimum below, so this is the toggle, the chip and the project name.
       */}
-      <div className="flex min-w-0 flex-1 basis-0 items-center gap-1">
+      <div className="flex min-w-fit flex-1 basis-0 items-center gap-1">
         {collapsed ? (
           <IconButton
             label={`Show the sidebar (${keyLabel('mod+b')})`}
@@ -343,7 +366,10 @@ export function AppHeader(): ReactElement {
             <PanelLeftIcon />
           </IconButton>
         ) : null}
-        <div className="mx-1 flex min-w-0 items-center gap-1.5">
+        {/* `flex-1` so the title inside can take the room the side is given;
+            without it this box would size to its content, and a title whose
+            intrinsic width is zero has none. */}
+        <div className="mx-1 flex min-w-0 flex-1 items-center gap-1.5">
           <RemoteChip />
           {project === null ? (
             /* Faint, not amber. This is a placeholder for a value nobody has
@@ -363,7 +389,12 @@ export function AppHeader(): ReactElement {
             </span>
           )}
           <ChevronRightIcon className="size-3 shrink-0 text-ink-faint" aria-hidden="true" />
-          <h1 className="min-w-0 truncate text-xs font-normal text-ink-muted">{title}</h1>
+          {/* `contain-inline-size` zeroes its intrinsic width, which keeps the
+              longest session name out of the side's minimum; `flex-1` then
+              hands it whatever is left, and `truncate` ends it there. */}
+          <h1 className="min-w-0 flex-1 contain-inline-size truncate text-xs font-normal text-ink-muted">
+            {title}
+          </h1>
         </div>
       </div>
 
@@ -375,8 +406,13 @@ export function AppHeader(): ReactElement {
       */}
       <SearchEntry />
 
-      {/* The right third. Status first, then the opener, then the app. */}
-      <div className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-1">
+      {/* The right third. Status first, then the opener, then the app.
+
+          `min-w-fit`: this side packs to its end, so anything it could not
+          hold spilled leftwards over the search — the update chip and the
+          waiting badge, exactly when both were up. It now asks for the width
+          of its controls and the search gives way instead. */}
+      <div className="flex min-w-fit flex-1 basis-0 items-center justify-end gap-1">
         <UpdateChip />
         <WaitingBadge />
         <OpenMenu delegated={delegated} pane={pane} />
@@ -664,6 +700,9 @@ function busyLabel(step: UpdateStep | null, version: string, percent: number | n
  * `max-w-md` and `hidden lg:flex`: it is the first thing that should give up
  * room, since the two things beside it — what you are looking at, and what
  * wants you — are facts, and this is a door that has a keyboard shortcut.
+ * `min-w-0` is what lets it: with the two sides holding their controls'
+ * width (`min-w-fit`, see the header note), this is the one item on the bar
+ * that shrinks, and it shrinks before anything can be painted over it.
  */
 function SearchEntry(): ReactElement {
   return (
