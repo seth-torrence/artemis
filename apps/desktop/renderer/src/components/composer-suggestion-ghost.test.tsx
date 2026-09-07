@@ -154,7 +154,7 @@ describe('the ghost', () => {
       ],
     });
     mount(<Composer />);
-    expect(field().placeholder).toBe('A tool call is waiting for your approval above…');
+    expect(field().placeholder).toBe('A tool call is waiting for your approval, just above this box…');
   });
 
   it('no longer renders the chip row', () => {

@@ -136,22 +136,25 @@ import {
   BotIcon,
   BrainIcon,
   ChevronRightIcon,
+  CircleStopIcon,
+  ClipboardListIcon,
   FilePenLineIcon,
   FileTextIcon,
+  GitForkIcon,
   GlobeIcon,
+  HourglassIcon,
   InfoIcon,
   ListChecksIcon,
+  MessageCircleQuestionMarkIcon,
+  PaperclipIcon,
   PlugIcon,
   SearchIcon,
+  ShieldAlertIcon,
   SparklesIcon,
   SquareArrowOutUpRightIcon,
   TerminalIcon,
-  GitForkIcon,
-  Undo2Icon,
-  CircleStopIcon,
-  HourglassIcon,
-  PaperclipIcon,
   TriangleAlertIcon,
+  Undo2Icon,
   WrenchIcon,
   type LucideIcon,
 } from 'lucide-react';
@@ -212,6 +215,7 @@ import { DiffView } from './DiffView';
 import { ActivityIndicator } from './Activity';
 import { ConversationLoading, EmptyState } from './EmptyState';
 import { InlinePermission } from './InlinePermission';
+import { focusParkedAsk } from './ParkedAsks';
 import { Markdown } from './Markdown';
 import { CodeBlock, Fold, StatusDot, ToneBadge, toneClasses, type Tone } from './primitives';
 import { StreamingText } from './StreamingText';
@@ -1569,12 +1573,16 @@ const MemberCard = memo(function MemberCard({ id }: { readonly id: string }): Re
 });
 
 /**
- * A parked request, answered where it happened.
+ * A parked request: a marker while it waits, the record once it is settled.
  *
- * The card itself is `InlinePermission`; this only supplies the transcript's
- * row chrome. Pending requests get a coloured rail label so they are findable
- * by scrolling as well as by the status line's counter — amber for an approval,
- * because that is a risk decision, and cyan for a question, because it is not.
+ * The card itself is `InlinePermission`, and while the request is pending it
+ * is drawn in the composer's `ParkedAsks` strip rather than here — the one
+ * place on screen wherever the transcript is scrolled. This row keeps the
+ * ask's place in the story: pending, it says the ask is waiting below and
+ * jumps there; settled, it is the same record it always was, in the same
+ * spot. The rail label still marks it, so a reader scrolling back can see
+ * where the agent stopped to ask — amber for an approval, because that is a
+ * risk decision, and cyan for a question, because it is not.
  */
 function PermissionRow({ item }: { readonly item: PermissionItem }): ReactElement {
   const pending = item.state === 'pending';
@@ -1586,8 +1594,57 @@ function PermissionRow({ item }: { readonly item: PermissionItem }): ReactElemen
       ts={item.ts}
       className={pending ? 'my-1' : undefined}
     >
-      <InlinePermission item={item} />
+      {pending ? <ParkedMarker item={item} /> : <InlinePermission item={item} />}
     </Line>
+  );
+}
+
+/**
+ * Where a pending request stands in the transcript.
+ *
+ * Not the card, on purpose: two live cards would be two drafts of one answer
+ * and two elements contending for focus when the request lands. One line
+ * saying what is waiting, and a button to the card. The tint matches the card
+ * it points at — cyan for a question, amber for an approval or a plan — so the
+ * marker and the pin read as the same thing seen twice.
+ */
+function ParkedMarker({ item }: { readonly item: PermissionItem }): ReactElement {
+  const question = item.request.question;
+  const plan = item.request.plan;
+  const Icon = question ? MessageCircleQuestionMarkIcon : plan ? ClipboardListIcon : ShieldAlertIcon;
+  const waiting = question
+    ? question.questions.length === 1
+      ? 'The agent has a question'
+      : `The agent has ${String(question.questions.length)} questions`
+    : plan
+      ? "The agent's plan is waiting for your sign-off"
+      : 'A tool call is waiting for your approval';
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-2 rounded-lg border px-2.5 py-1.5',
+        question ? 'border-cyan/45 bg-cyan/6' : 'border-amber/45 bg-amber/8',
+      )}
+    >
+      <Icon
+        className={cn('size-3.5 shrink-0', question ? 'text-cyan' : 'text-amber')}
+        aria-hidden="true"
+      />
+      <p className="min-w-0 flex-1 text-2xs leading-snug text-ink-muted">
+        <span className="font-medium text-ink">{waiting}.</span> It is pinned above the prompt
+        box until you answer, so it cannot scroll out of reach.
+      </p>
+      <Button
+        size="xs"
+        variant="ghost"
+        className="shrink-0"
+        onClick={() => {
+          focusParkedAsk(item.requestId);
+        }}
+      >
+        Answer below
+      </Button>
+    </div>
   );
 }
 
