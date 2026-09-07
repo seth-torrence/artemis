@@ -1,6 +1,34 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.7.3
+
+Two repairs to conversations held with an Artemis server.
+
+**A served turn answers once.** Every turn that used a tool drew its whole
+answer twice — once as it streamed, then again underneath, whole. The second
+copy was the closing block arriving after the activity rows had already
+settled the first, with nothing on it to say which block it finished. It says
+so now, and the answer lands once. A turn that used no tools was never
+affected, which is what made it look intermittent.
+
+**A served turn shows its thinking.** Reasoning never crossed the wire at all:
+the server had nowhere to put it that was not the answer itself, so it dropped
+it. It now travels beside the answer, in the field the reasoning-capable
+OpenAI-shaped servers already use, and the thinking rows appear where the
+model wrote them. A subagent's own words stay out of the answer too — they
+were being read back into it, so a delegated agent's findings arrived inline
+and then again in the agent's account of them.
+
+**A dropped connection no longer ends the turn.** A laptop that slept, a
+tunnel that went down or a server that restarted mid-turn left the pane
+holding "Could not reach the Artemis server" while the run carried on
+elsewhere, unwatched and unreadable. The run was always kept; there was simply
+no way back to it. Now the pane says the link went, reconnects on its own, and
+picks the answer up from the last thing it drew. Quiet stretches carry a
+heartbeat, so a stream that has genuinely died is noticed in seconds rather
+than at the end of a turn that never comes.
+
 ## What's new in 2.7.2
 
 **A turn that produced nothing now says so.** A run can end having said
