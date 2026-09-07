@@ -280,6 +280,30 @@ describe('visibleTabs scoped to one pane', () => {
     const tabs = visibleTabs([], [], busy, [{ paneId: 'pane2', taskId: 'task1' }], [], [], true, 'pane2');
     expect(tabs.map(tabKey)).toEqual(['tasks:pane2', 'agent:pane2:task1']);
   });
+
+  it('draws the documents list beside the folder browser, and only when asked', () => {
+    const asked: readonly ShownConversation[] = [
+      { paneId: 'pane1', filesRequested: true, documentsRequested: true },
+      { paneId: 'pane2', documentsRequested: true },
+    ];
+    expect(visibleTabs([], [], asked, [], [], [], true, 'pane1').map(tabKey)).toEqual([
+      'files:pane1',
+      'documents:pane1',
+    ]);
+    expect(visibleTabs([], [], asked, [], [], [], true, 'pane2').map(tabKey)).toEqual([
+      'documents:pane2',
+    ]);
+    // A request, never an arrival: the setting that keeps agent surfaces out
+    // of the strip has no say over it.
+    expect(visibleTabs([], [], asked, [], [], [], false, 'pane2').map(tabKey)).toEqual([
+      'documents:pane2',
+    ]);
+    expect(visibleTabs([], [], [{ paneId: 'pane1' }], [], [], [], true, 'pane1')).toEqual([]);
+    // Two views of one column are two tabs.
+    expect(
+      sameTab({ kind: 'documents', paneId: 'pane1' }, { kind: 'files', paneId: 'pane1' }),
+    ).toBe(false);
+  });
 });
 
 /*

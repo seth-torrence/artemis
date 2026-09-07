@@ -69,6 +69,26 @@ export function useActivityGroup(id: string): ActivityGroup | undefined {
 }
 
 /**
+ * The tool calls that made artifacts, for the pane this component is in.
+ *
+ * Ids in transcript order, and the array keeps its identity until the set
+ * changes: it is rebuilt with the rows, on the same structural beat, so a
+ * token never touches it and a component reading only its length re-renders
+ * when a document arrives and not otherwise. Each id is a `ToolItem` to be
+ * read through {@link useTranscriptItem}, or turned into a document list with
+ * `collectDocuments`.
+ */
+export function useTranscriptArtifacts(): readonly string[] {
+  const { transcript } = usePaneRef();
+  const subscribe = useCallback(
+    (onChange: () => void) => transcript.subscribeList(onChange),
+    [transcript],
+  );
+  const snapshot = useCallback(() => transcript.getArtifactsSnapshot(), [transcript]);
+  return useSyncExternalStore(subscribe, snapshot);
+}
+
+/**
  * One item, subscribed by id.
  *
  * A `text.delta` notifies only the component holding that id, so a burst of
