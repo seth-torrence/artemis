@@ -1,6 +1,24 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.8.0
+
+A memory bank says how it is filed, a served run reads your standing instructions, and a bypass-permissions run works from a root container that says it is the sandbox.
+
+**A memory bank says how it is filed.** A bank's own `cerebro.json` is read now: its layout (memories flat under `memories/`, or nested inside each project under `projects/<org>/<project>/memories/`), its default org, and an `instructions` file its maintainers wrote for agents. The prompt Artemis composes follows what it reads. A bank filed by project refuses a draft that names no existing project, and the command the prompt used to hand out failed on the first draft of every session — it now carries `--org` and `--project` and says what they name and where to look. A bank's own notes are carried after Artemis's text, for a bank this machine may write to. One more sentence settles a confusion that ran through every transcript: `cerebro` is the name of the tool, and the bank is called whatever you named it. A project opened for the first time gets the bank installed for that project at its first run, rather than at the next bank commit; a bank is recognised by its declared layout, not only by a `memories/` folder.
+
+**A served run reads your standing instructions.** A conversation held with an Artemis server was told none of your prompt library; now the library crosses the wire and is appended on top of the serving provider's preset, where that provider can take one. Where it cannot — a Codex or OpenCode account — the server sets it aside and says so on the first chunk, and the transcript carries one line about it rather than a run that quietly went without. The memory-bank prompt a served run gets describes the banks on the machine it runs on: the server composes it from its own registry, and the desktop keeps its own bank prompt at home.
+
+**Bypass permissions from a root container that says it is the sandbox.** A server running as root withheld `bypassPermissions` from its Claude accounts because Claude Code refuses the flag under root — but the CLI's own rule has an opt-in, `IS_SANDBOX=1`, for a container whose only user is root. The catalogue mirrors that rule exactly, so a server started with the variable offers the mode it can serve. `docker-compose.yml` documents the opt-in and what it costs.
+
+**Artemis's own prompt can be deleted, and stays deleted.** The team-memory-bank prompt could be switched off but never removed; a deleted row came straight back on the next read. The removal is recorded now, Delete sits beside Reset on the row, and a "Bring back" button under the list returns the prompt in its shipped state.
+
+**A document stands where the agent made it.** A page, an SVG or a markdown file the agent writes for you now sits in the thread at the point it was written, between the sentence that announced it and the one that followed, instead of stacking under the fold at the foot of the turn. The header's opener has a **Documents** row with the count, and the dock lists every document the conversation has made, each row opening the document, its source, or the place in the thread where it was made.
+
+**The header's chips never cover the search.** With an update ready and a conversation waiting, the two chips painted over the search field on any window under about 1400px on Windows. Each side of the header now keeps at least the width of its own controls, and the search is what gives up room.
+
+**cerebro 0.8.1.** The memory-bank CLI refuses an install that would empty a project — a bank whose files it cannot read, or a layout it does not know — instead of installing nothing and pruning every project's copy, which is what an older CLI did when pointed at a bank laid out in a way it could not read. A host may name the project a sync installs into, refusals name the bank's projects, and a bank may name an `instructions` file.
+
 ## What's new in 2.7.3
 
 Two repairs to conversations held with an Artemis server.
