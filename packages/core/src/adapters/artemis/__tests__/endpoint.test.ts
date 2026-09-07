@@ -502,6 +502,67 @@ describe('refusals and losses', () => {
   });
 });
 
+describe('the request body it sends', () => {
+  it('carries appended standing instructions as artemis.systemPrompt', async () => {
+    let sent: unknown;
+    const { origin } = await serve((_request, response, body) => {
+      sent = body;
+      happyStream(response);
+    });
+    await drive(origin, { systemPrompt: { kind: 'append', text: 'Follow the house style.' } });
+    expect((sent as { artemis?: { systemPrompt?: string } }).artemis?.systemPrompt).toBe(
+      'Follow the house style.',
+    );
+  });
+
+  it('sends no systemPrompt when the run carries a default one', async () => {
+    let sent: unknown;
+    const { origin } = await serve((_request, response, body) => {
+      sent = body;
+      happyStream(response);
+    });
+    await drive(origin, { systemPrompt: { kind: 'default' } });
+    expect((sent as { artemis?: Record<string, unknown> }).artemis ?? {}).not.toHaveProperty(
+      'systemPrompt',
+    );
+  });
+});
+
+describe('what the server set aside', () => {
+  it('says once, in the transcript, that the serving provider took no standing instructions', async () => {
+    /*
+     * The first chunk names what the server dropped. The pane on this side
+     * still lists the prompt as active, so the run says so itself — in the
+     * synthetic voice a dropped link speaks in, not as something the model
+     * said — and only once, however many chunks repeat the list.
+     */
+    const { origin } = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      response.write(sse(chunk({ role: 'assistant' }, { artemis: { ignored: ['artemis.systemPrompt'] } })));
+      response.write(sse(chunk({ content: 'Hello.' }, { artemis: { ignored: ['artemis.systemPrompt'] } })));
+      response.write(sse(chunk({}, { finish_reason: 'stop', artemis: { endReason: 'completed' } })));
+      response.write(sse('[DONE]'));
+      response.end();
+    });
+    const events = await drive(origin, { systemPrompt: { kind: 'append', text: 'Follow the house style.' } });
+    const notices = events.filter(
+      (event) => event.type === 'text.complete' && (event as { synthetic?: boolean }).synthetic === true,
+    );
+    expect(notices).toHaveLength(1);
+    expect((notices[0] as { text: string }).text).toMatch(/cannot take standing instructions/);
+    // The reply itself is untouched.
+    expect(events.some((event) => event.type === 'text.delta' && (event as { text: string }).text === 'Hello.')).toBe(true);
+  });
+
+  it('says nothing when nothing was set aside', async () => {
+    const { origin } = await serve((_request, response) => happyStream(response));
+    const events = await drive(origin, { systemPrompt: { kind: 'append', text: 'Follow the house style.' } });
+    expect(
+      events.some((event) => event.type === 'text.complete' && (event as { synthetic?: boolean }).synthetic === true),
+    ).toBe(false);
+  });
+});
+
 describe('what a run refuses up front', () => {
   const adapter = createArtemisAdapter();
   const base = {
@@ -537,6 +598,15 @@ describe('what a run refuses up front', () => {
         ...base,
         resumeSessionId: 'sess-abc',
         forkSession: true,
+      } as unknown as ResolvedRunInput),
+    ).rejects.toMatchObject({ agentError: { code: 'invalid_request' } });
+  });
+
+  it('a replacing system prompt, which would displace the serving preset', async () => {
+    await expect(
+      adapter.createRun({
+        ...base,
+        systemPrompt: { kind: 'replace', text: 'You are a pirate.' },
       } as unknown as ResolvedRunInput),
     ).rejects.toMatchObject({ agentError: { code: 'invalid_request' } });
   });

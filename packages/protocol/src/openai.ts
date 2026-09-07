@@ -323,7 +323,14 @@ export interface ArtemisResponseExtensions {
   readonly runId?: string;
   /** The concrete model that ran, when the route named an alias. */
   readonly resolvedModel?: string;
-  /** Parameters that were accepted and not applied. See {@link PARAMETER_POLICY}. */
+  /**
+   * What was accepted and not applied: an OpenAI parameter the caller asked to
+   * have ignored (see {@link PARAMETER_POLICY}), or an `artemis.*` extension
+   * the serving account's provider cannot honour, named as `artemis.<field>` —
+   * `artemis.systemPrompt` on an account whose provider has no system-prompt
+   * append. On a stream it rides the first chunk, so a client knows before the
+   * first token; on a whole reply it sits beside the rest of this block.
+   */
   readonly ignored?: readonly string[];
   /** What the agent did. See {@link ArtemisActivity}. */
   readonly activity?: readonly ArtemisActivity[];

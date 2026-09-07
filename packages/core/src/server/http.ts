@@ -60,6 +60,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { PlanUsage } from '@rx-artemis/protocol';
 import type {
   AgentEvent,
+  ArtemisChatExtensions,
   OpenAiChatChunk,
   OpenAiChatRequest,
   OpenAiModelList,
@@ -2477,6 +2478,20 @@ async function handleChatCompletions(
   }
 
   const extensions = readChatExtensions(body);
+  // Bounded where the request is validated, per the wire type's promise. The
+  // whole body is already capped, but a system prompt is the one caller-supplied
+  // string large enough to be worth its own limit — mirroring `runInput.ts`'s
+  // `LIMITS.systemPrompt`, so the completions and bridge surfaces agree.
+  if (extensions.systemPrompt !== undefined && extensions.systemPrompt.length > 200_000) {
+    return attribute(
+      fail(
+        400,
+        'invalid_request_error',
+        'invalid_body',
+        '`artemis.systemPrompt` is too long (max 200000 characters).',
+      ),
+    );
+  }
   /*
    * `ignoreUnsupported` is read here rather than in `readChatExtensions`
    * because it is not a *setting for the run* — it changes how this request is
@@ -2503,6 +2518,28 @@ async function handleChatCompletions(
   if (model === undefined) {
     return attribute(modelNotFound(chat.model));
   }
+
+  /*
+   * Standing instructions reach the run only where the serving account's
+   * provider can append to its preset. Codex and OpenCode have no append —
+   * `systemPromptAppend: false` on their descriptors, and the catalogue
+   * publishes that per account — and their adapters never read the field, so
+   * a prompt handed to them would be accepted and silently unread. That is the
+   * one failure the capability flag exists to prevent, and it is the reverse of
+   * the permission mode's convention: a mode is dropped quietly because the
+   * run then opens in the serving user's setting, which is a real outcome; an
+   * instruction the model never saw is not an outcome, it is a client that
+   * believes it was heard. So the field is dropped *and reported*, under
+   * `artemis.ignored` beside any lenient parameter, and a client can say so.
+   */
+  const account = profiles.find((profile) => String(profile.id) === String(model.profileId));
+  const { systemPrompt, ...withoutSystemPrompt } = extensions;
+  const dropSystemPrompt =
+    systemPrompt !== undefined && account?.capabilities.systemPromptAppend !== true;
+  const applied: ArtemisChatExtensions = dropSystemPrompt ? withoutSystemPrompt : extensions;
+  const ignored: readonly string[] = dropSystemPrompt
+    ? [...review.ignored, 'artemis.systemPrompt']
+    : review.ignored;
 
   /*
    * The resume gate. A `sessionId` names a stored conversation, and the only
@@ -2571,8 +2608,8 @@ async function handleChatCompletions(
     model,
     cwd: workspace.path,
     request: chat,
-    extensions,
-    ignored: review.ignored,
+    extensions: applied,
+    ignored,
     ...(request.signal === undefined ? {} : { signal: request.signal }),
     // Absent when this build has no directory: with nothing to hold the
     // deadline, a detach would be an abandonment, so the turn keeps its old
@@ -2658,7 +2695,7 @@ async function handleChatCompletions(
       model: model.route,
       created,
       result,
-      ignored: review.ignored,
+      ignored,
       ...(model.resolvedModel === undefined ? {} : { resolvedModel: model.resolvedModel }),
     }),
   });
@@ -2895,7 +2932,18 @@ async function* streamTurn(input: {
     ...(input.report === undefined ? {} : { report: input.report }),
   };
 
-  yield sseEvent(chatChunk({ ...frame, delta: { role: 'assistant' } }));
+  // What was accepted and not applied rides the role chunk — first, so a
+  // client learns before the first token that something it sent was set
+  // aside. The whole-response shape carries the same list on its `artemis`
+  // block; a streaming client had no way to see it at all until now.
+  const { ignored } = input.turn;
+  yield sseEvent(
+    chatChunk({
+      ...frame,
+      delta: { role: 'assistant' },
+      ...(ignored.length === 0 ? {} : { artemis: { ignored } }),
+    }),
+  );
 
   try {
     const source = paced(

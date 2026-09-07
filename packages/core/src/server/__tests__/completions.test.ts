@@ -287,6 +287,16 @@ describe('a turn', () => {
     expect(plain.started[0]?.input).not.toHaveProperty('permissionMode');
   });
 
+  it('hands appended standing instructions to the run, and omits an absent one', async () => {
+    const source = fakeRuns([{ type: 'run.end', reason: 'completed' }] as Partial<AgentEvent>[]);
+    await drain(source, turn({ extensions: { systemPrompt: 'Follow the house style.' } }));
+    expect(source.started[0]?.input).toMatchObject({ systemPrompt: 'Follow the house style.' });
+
+    const plain = fakeRuns([{ type: 'run.end', reason: 'completed' }] as Partial<AgentEvent>[]);
+    await drain(plain);
+    expect(plain.started[0]?.input).not.toHaveProperty('systemPrompt');
+  });
+
   it('announces a fresh session the moment it exists, not only on done', async () => {
     // A client whose stream dies mid-turn would otherwise learn the id never —
     // and the Artemis-driving-Artemis adapter builds its `session.started`
@@ -1463,6 +1473,99 @@ describe('POST /v1/chat/completions', () => {
       const body = (await response.json()) as { artemis: { ignored: readonly string[] } };
       // Accepted, not applied, and *said so* — which is the whole bargain.
       expect(body.artemis.ignored).toContain('temperature');
+    } finally {
+      await server.close();
+    }
+  });
+
+  /*
+   * The catalogue says whether an account's provider can append standing
+   * instructions; Codex and OpenCode cannot, and their adapters never read the
+   * field. Sending it anyway would be accepted and unread — the one failure
+   * the capability flag exists to prevent — so it is dropped *and reported*.
+   */
+  async function serveWith(appendable: boolean, source: RunSource) {
+    const { createArtemisServer } = await import('../http.js');
+    const { createWorkspaceResolver } = await import('../workspaces.js');
+    const profiles = await CATALOGUE.read();
+    const server = createArtemisServer({
+      port: 0,
+      connections: () => [CONNECTION],
+      version: '1.1.1',
+      catalogue: {
+        read: async () =>
+          profiles.map((profile) => ({
+            ...profile,
+            capabilities: { ...NO_CAPABILITIES, systemPromptAppend: appendable },
+          })),
+        invalidate: () => undefined,
+      },
+      runs: source,
+      workspaces: createWorkspaceResolver(),
+    });
+    const port = await server.listen();
+    return { server, url: `http://127.0.0.1:${port}/v1/chat/completions` };
+  }
+
+  it('drops standing instructions for an account whose provider cannot append, and says so', async () => {
+    const source = fakeRuns([{ type: 'run.end', reason: 'completed', result: 'ok' }]);
+    const { server, url } = await serveWith(false, source);
+    try {
+      const response = await post(url, {
+        model: 'work-max/opus',
+        messages: [{ role: 'user', content: 'hi' }],
+        artemis: { systemPrompt: 'Follow the house style.' },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { artemis: { ignored?: readonly string[] } };
+      expect(body.artemis.ignored).toEqual(['artemis.systemPrompt']);
+      // And the run was started without it: nothing downstream ever saw the text.
+      expect(source.started[0]?.input).not.toHaveProperty('systemPrompt');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('carries the drop on the first chunk of a stream, before any token', async () => {
+    const source = fakeRuns([
+      { type: 'text.delta', text: 'ok' },
+      { type: 'run.end', reason: 'completed' },
+    ] as Partial<AgentEvent>[]);
+    const { server, url } = await serveWith(false, source);
+    try {
+      const response = await post(url, {
+        model: 'work-max/opus',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        artemis: { systemPrompt: 'Follow the house style.' },
+      });
+      const chunks = (await response.text())
+        .split('\n\n')
+        .filter((line) => line.startsWith('data: '))
+        .map((line) => line.slice(6))
+        .filter((chunk) => chunk !== '[DONE]')
+        .map((chunk) => JSON.parse(chunk) as Record<string, any>);
+      expect(chunks[0]?.choices[0]?.delta).toEqual({ role: 'assistant' });
+      expect(chunks[0]?.artemis?.ignored).toEqual(['artemis.systemPrompt']);
+      expect(source.started[0]?.input).not.toHaveProperty('systemPrompt');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('hands standing instructions through, unreported, where the provider can append', async () => {
+    const source = fakeRuns([{ type: 'run.end', reason: 'completed', result: 'ok' }]);
+    const { server, url } = await serveWith(true, source);
+    try {
+      const response = await post(url, {
+        model: 'work-max/opus',
+        messages: [{ role: 'user', content: 'hi' }],
+        artemis: { systemPrompt: 'Follow the house style.' },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { artemis: { ignored?: readonly string[] } };
+      expect(body.artemis).not.toHaveProperty('ignored');
+      expect(source.started[0]?.input).toMatchObject({ systemPrompt: 'Follow the house style.' });
     } finally {
       await server.close();
     }

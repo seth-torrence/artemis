@@ -11,5 +11,6 @@
  * and the headless server is a host.
  */
 
+export * from './prompt.js';
 export * from './registry.js';
 export * from './secrets.js';

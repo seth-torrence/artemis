@@ -123,6 +123,16 @@ describe('readChatExtensions', () => {
     expect(readChatExtensions({ artemis: { permissionMode: 7 } })).toEqual({});
   });
 
+  it('carries appended standing instructions, and drops an empty or non-string one', () => {
+    expect(readChatExtensions({ artemis: { systemPrompt: 'Follow the house style.' } })).toEqual({
+      systemPrompt: 'Follow the house style.',
+    });
+    // Empty is not "instructions the caller chose"; it is nothing, and nothing
+    // should not cost a prompt-cache round to say. A non-string is a caller bug.
+    expect(readChatExtensions({ artemis: { systemPrompt: '' } })).toEqual({});
+    expect(readChatExtensions({ artemis: { systemPrompt: 42 } })).toEqual({});
+  });
+
   it('drops a remote block that says nothing it can act on', () => {
     // Same rule as every other field: unknown keys drop, wrong types drop, and
     // a client that meant it sends a boolean. Half-honouring `detach: 1` would

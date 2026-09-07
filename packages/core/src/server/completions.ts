@@ -115,13 +115,16 @@ export interface RunSource {
    * Start a run and resolve once it is registered.
    *
    * The shape is deliberately narrower than `RunInput`: this module may not
-   * choose a system prompt or a set of tools, because those are the user's
-   * settings and an HTTP caller is not the user. The permission mode joined
-   * the shape once remote permission answering existed: a caller trusted to
-   * approve every prompt was already trusted with everything a mode grants,
-   * and refusing the mode only made the approvals more tedious. A host
-   * honours it insofar as the serving provider supports it, and drops it
-   * otherwise.
+   * choose the *tools*, because those are the user's settings and an HTTP
+   * caller is not the user. Two fields have since joined it, on the same
+   * reasoning each time — a thing the caller already owns is a thing the shape
+   * may as well carry. The permission mode came with remote permission
+   * answering: a caller trusted to approve every prompt already holds
+   * everything a mode grants. The system prompt is the caller's *own* standing
+   * instructions, composed on its machine and applied only as an append on top
+   * of the serving provider's preset — never a replacement, which the adapter
+   * refuses before the wire. Both are requests: a host honours each insofar as
+   * the serving provider supports it, and an older client sends neither.
    */
   startRun(input: {
     readonly providerId: string;
@@ -134,6 +137,8 @@ export interface RunSource {
     readonly ultracode?: boolean;
     readonly resumeSessionId?: string;
     readonly permissionMode?: string;
+    /** Standing instructions to append to the provider's preset. Append-only. */
+    readonly systemPrompt?: string;
   }): Promise<RunHandle>;
 
   /** Every event from every run. Filtered by `runId` here. */
@@ -795,6 +800,9 @@ export async function* runTurn(
         ...(turn.extensions.permissionMode === undefined
           ? {}
           : { permissionMode: turn.extensions.permissionMode }),
+        ...(turn.extensions.systemPrompt === undefined
+          ? {}
+          : { systemPrompt: turn.extensions.systemPrompt }),
       });
     } catch (error) {
       yield {

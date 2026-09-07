@@ -169,12 +169,15 @@ export const ARTEMIS_CAPABILITIES: Capabilities = {
   // user's setting. The trust argument is on the wire type: a client that can
   // approve every remote prompt already holds everything a mode grants.
   permissionModes: ['plan', 'default', 'acceptEdits', 'bypassPermissions'],
-  // Still false, for the reason the module header gives: the remote agent's
-  // instructions are the serving user's settings, and the completions route
-  // deliberately takes no system prompt from an HTTP caller (see
-  // `RunSource.startRun`). A `systemPrompt` sent here would be silently dropped,
-  // which is the one failure this flag exists to prevent.
-  systemPromptAppend: false,
+  // The client composes its standing instructions — the prompt library, and the
+  // memory-bank prompt rendered against this machine's own banks — and the
+  // adapter carries them to the server as `artemis.systemPrompt`, where they are
+  // appended on top of the serving provider's preset. Only an append crosses: a
+  // `replace` is refused in `createRun`, since it would displace the coding
+  // agent's own instructions on a machine the caller does not own. An older
+  // server drops the field, degrading to a run with no standing instructions —
+  // the behaviour before this existed.
+  systemPromptAppend: true,
 };
 
 /**
@@ -393,6 +396,8 @@ class ArtemisRun implements Run {
    */
   #heartbeats = false;
   #notices = 0;
+  /** Whether the "instructions set aside" notice has been said. Once per run. */
+  #instructionsDropped = false;
 
   constructor(input: ResolvedRunInput, reconnect: Required<ArtemisReconnectOptions>) {
     this.runId = input.runId;
@@ -503,6 +508,13 @@ class ArtemisRun implements Run {
         ...(this.#input.permissionMode === undefined
           ? {}
           : { permissionMode: this.#input.permissionMode }),
+        // Standing instructions, composed by the engine into an `append` before
+        // the run reached this adapter. Only the append text crosses; a
+        // `replace` was refused in `createRun`. An older server ignores the
+        // field, which is the graceful degradation.
+        ...(this.#input.systemPrompt?.kind === 'append'
+          ? { systemPrompt: this.#input.systemPrompt.text }
+          : {}),
       };
       const stream = this.#streamState();
       let attempt = new AbortController();
@@ -715,6 +727,20 @@ class ArtemisRun implements Run {
   #apply(delta: ServerStreamDelta, stream: StreamState): void {
     const extensions = delta.artemis;
     if (extensions?.sessionId !== undefined) this.#noteSession(extensions.sessionId);
+    /*
+     * The server set the standing instructions aside: the serving account's
+     * provider has no system-prompt append. Said once, in the transcript, in
+     * the same synthetic voice a dropped link speaks in — because the pane on
+     * this side lists the prompt as active, and a run that quietly went without
+     * it is the failure the capability flag exists to prevent. The user's cure
+     * is on the picker: an account whose provider can take instructions.
+     */
+    if (extensions?.ignored?.includes('artemis.systemPrompt') === true && !this.#instructionsDropped) {
+      this.#instructionsDropped = true;
+      this.#notice(
+        "The serving account's provider cannot take standing instructions, so this run started without your prompt library. Pick an account on a provider that can (Claude, or a local model) to have them apply.",
+      );
+    }
     // Learned like the session id: the server announces it once and early,
     // and every native run route addresses it from here on.
     if (extensions?.runId !== undefined) this.#remoteRunId = extensions.runId as RunId;
@@ -1310,6 +1336,14 @@ export function createArtemisAdapter(
       if (input.forkSession === true || input.rewindToMessageId !== undefined) {
         return Promise.reject(
           adapterError('invalid_request', 'The Artemis server cannot fork or rewind a session yet.'),
+        );
+      }
+      if (input.systemPrompt?.kind === 'replace') {
+        return Promise.reject(
+          adapterError(
+            'invalid_request',
+            'The Artemis server can only append standing instructions, not replace the system prompt: the serving provider relies on its own preset to use its tools.',
+          ),
         );
       }
       if (input.model === undefined || input.model.trim() === '') {

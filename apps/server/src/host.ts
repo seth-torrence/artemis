@@ -12,6 +12,10 @@
  *
  *  - **No session naming.** The desktop titles new conversations with a model
  *    call; here a session lists under its first prompt. Cosmetic.
+ *  - **No prompt library of its own.** A served run's standing instructions
+ *    are the client's, carried on the wire; what this process adds is the
+ *    memory-bank prompt for the banks *this* machine carries, composed from
+ *    the CLI's registry under this process's home — see `runSource.startRun`.
  *  - **No plan-usage polling, no update checks, no notifications.** All
  *    window furniture.
  *  - **Permission prompts on the completions surface are auto-denied**, exactly
@@ -37,6 +41,8 @@ import {
   createRemoteRunGuard,
   createSessionLedger,
   createWorkspaceResolver,
+  joinSystemPromptAppends,
+  machineBankPrompt,
   managedEnvKeys,
   DuplicateProfileLabelError,
   ProfileStore,
@@ -364,6 +370,28 @@ export function createHeadlessHost(dataDir: string): HeadlessHost {
   const runSource: RunSource = {
     startRun: (input) => {
       const permissionMode = clampMode(input.providerId as ProviderId, input.permissionMode);
+      /*
+       * What the run is told, on top of the serving provider's preset: the
+       * client's own standing instructions (the route has already set the
+       * field aside for a provider that cannot append), then this machine's
+       * memory-bank prompt, composed here from this machine's own registry.
+       *
+       * Here and not on the client, because the prompt is about the machine
+       * the run executes on — the banks *this* container carries, at the paths
+       * they have here, driven by the CLI on this PATH. The client's rendering
+       * would name its own slugs and a path on a laptop; the desktop keeps
+       * that built-in off the wire for exactly this reason. Consent is the
+       * CLI's own: a bank is described only if `cerebro enable` left it
+       * enabled in the registry and it is present on disk.
+       *
+       * The wire and the adapter both refuse a replacement, so an append is
+       * the only shape that reaches here.
+       */
+      const canAppend =
+        providers.get(input.providerId as ProviderId)?.capabilities.systemPromptAppend === true;
+      const instructions = canAppend
+        ? joinSystemPromptAppends(input.systemPrompt, machineBankPrompt())
+        : undefined;
       return runs.start({
         providerId: input.providerId as ProviderId,
         profileId: input.profileId as ProfileId,
@@ -377,6 +405,9 @@ export function createHeadlessHost(dataDir: string): HeadlessHost {
           ? {}
           : { resumeSessionId: input.resumeSessionId as never }),
         ...(permissionMode === undefined ? {} : { permissionMode: permissionMode as never }),
+        ...(instructions === undefined
+          ? {}
+          : { systemPrompt: { kind: 'append', text: instructions } as const }),
       } as never);
     },
     subscribe: (listener) => runs.subscribe(listener),

@@ -352,6 +352,14 @@ export function createServerHost(options: ServerHostOptions): ServerHost {
         ...(input.permissionMode === undefined
           ? {}
           : { permissionMode: input.permissionMode as never }),
+        // The client composed these on its own machine; apply them as an append
+        // on top of this profile's preset. `engine.startRun` also merges this
+        // machine's own library, and `withSystemPromptAppended` concatenates the
+        // two — a desktop that serves a client both of which have standing
+        // instructions sends both, which is additive rather than a conflict.
+        ...(input.systemPrompt === undefined
+          ? {}
+          : { systemPrompt: { kind: 'append', text: input.systemPrompt } as const }),
       } as never);
     },
     subscribe: (listener) => options.engine.require().subscribe(listener),
