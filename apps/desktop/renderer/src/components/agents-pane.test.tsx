@@ -14,13 +14,14 @@
  *     quiet one — a Codex profile ticked in a settings pane while the model is
  *     never told a word of it. Hiding the row would be the same lie with better
  *     manners.
- *  2. **A built-in cannot be deleted, and only the one about the user's team
- *     can be edited.** A deleted built-in would come back on the next read and
- *     read as the app overruling the user. Editing is narrower: the memory-bank
- *     prompt is mostly claims about a team Artemis cannot know, so that one is
- *     the user's to take over — and taking it over has to be recorded, and
- *     reversible, or Artemis silently stops updating a prompt nobody decided to
- *     freeze.
+ *  2. **A built-in can be deleted, and the deletion sticks; only the one about
+ *     the user's team can be edited.** A deleted built-in used to come back on
+ *     the next read and read as the app overruling the user, which is why the
+ *     pane offered no delete. Now the removal is recorded and offered back
+ *     under the list. Editing is narrower: the memory-bank prompt is mostly
+ *     claims about a team Artemis cannot know, so that one is the user's to
+ *     take over — and taking it over has to be recorded, and reversible, or
+ *     Artemis silently stops updating a prompt nobody decided to freeze.
  *  3. **"Every profile" is not the same as ticking every box.** Unticking it
  *     has to produce a concrete list, and that list has to exclude the profiles
  *     that could not have received it anyway.
@@ -114,6 +115,8 @@ const OTHER_BUILT_IN_ROW = {
 
 /** The library the next `list` answers with. Reassigned per test before rendering. */
 let library: unknown[] = [];
+/** Built-ins the stubbed library records as removed. */
+let dismissed: string[] = [];
 /**
  * Whether the stubbed banks report themselves usable — master gate on, and a
  * bank that exists and is wired. The same conjunction `banksAvailability`
@@ -122,7 +125,7 @@ let library: unknown[] = [];
  */
 let banksAvailable = true;
 /** Every document the pane has saved, oldest first. */
-let saved: { prompts: unknown[] }[] = [];
+let saved: { prompts: unknown[]; dismissedBuiltIns?: unknown }[] = [];
 
 /*
  * Installed once, before the first render: `resolveBridge` memoises its binding
@@ -137,8 +140,17 @@ let saved: { prompts: unknown[] }[] = [];
  */
 (globalThis.window as unknown as { artemis: unknown }).artemis = {
   agentPrompts: {
-    list: async () => ({ ok: true as const, value: { document: { version: 1, prompts: library } } }),
-    save: async (request: { document: { prompts: unknown[] } }) => {
+    list: async () => ({
+      ok: true as const,
+      value: {
+        document: {
+          version: 1,
+          prompts: library,
+          ...(dismissed.length === 0 ? {} : { dismissedBuiltIns: dismissed }),
+        },
+      },
+    }),
+    save: async (request: { document: { prompts: unknown[]; dismissedBuiltIns?: unknown } }) => {
       saved.push(request.document);
       return { ok: true as const, value: { document: request.document } };
     },
@@ -241,6 +253,7 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   seedApp({ providers: PROVIDERS as never, profiles: PROFILES as never });
   library = [HOUSE_STYLE, CEREBRO_ROW];
+  dismissed = [];
   banksAvailable = true;
   saved = [];
   // TipTap drives a contenteditable through ProseMirror, which reaches for
@@ -386,12 +399,46 @@ describe("Artemis's own prompts", () => {
     expect(row.markdown).toBe('');
   });
 
-  it('offers no delete, because a deleted built-in comes straight back', async () => {
+  it('can be deleted, and the deletion is recorded so a read does not put it back', async () => {
     await renderLoaded();
     open(MEMORY_BANKS_PROMPT_NAME);
-    expect(screen.queryByRole('button', { name: /^Delete/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: `Delete “${MEMORY_BANKS_PROMPT_NAME}”` }));
+    // The dialog says what removal costs and that it can be brought back.
+    expect(screen.getByText(/Bring back/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 
-    // A user prompt does offer one.
+    // Gone from the list.
+    expect(screen.queryByRole('button', { name: new RegExp(`^${MEMORY_BANKS_PROMPT_NAME}`) })).toBeNull();
+
+    await flushSave();
+    expect(lastSave()).not.toBeNull();
+    expect(lastSave()!.prompts.some((p: any) => p.builtIn === 'builtin:cerebro')).toBe(false);
+    // The record is the whole point: a row filtered out without it would be
+    // re-appended by the next read.
+    expect((lastSave() as any).dismissedBuiltIns).toEqual(['builtin:cerebro']);
+  });
+
+  it('offers a removed built-in back, in its shipped state', async () => {
+    library = [HOUSE_STYLE];
+    dismissed = ['builtin:cerebro'];
+    await renderLoaded();
+    expect(screen.queryByRole('button', { name: new RegExp(`^${MEMORY_BANKS_PROMPT_NAME}`) })).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: new RegExp(`^Bring back “${MEMORY_BANKS_PROMPT_NAME}”`) }),
+    );
+    expect(screen.getByRole('button', { name: new RegExp(`^${MEMORY_BANKS_PROMPT_NAME}`) })).toBeTruthy();
+
+    await flushSave();
+    const row = lastSave()!.prompts.find((p: any) => p.builtIn === 'builtin:cerebro');
+    expect(row).toBeDefined();
+    expect(row.enabled).toBe(true);
+    expect(row.overridden).toBeUndefined();
+    expect((lastSave() as any).dismissedBuiltIns).toBeUndefined();
+  });
+
+  it('still offers delete on a prompt the user wrote', async () => {
+    await renderLoaded();
     open('House style');
     expect(screen.queryByRole('button', { name: /^Delete/ })).not.toBeNull();
   });

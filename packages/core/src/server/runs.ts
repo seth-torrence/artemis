@@ -133,6 +133,15 @@ interface RunRecord {
   /** The only connection that may address this run. */
   readonly connectionId: string;
   /**
+   * The route the run was started on, as `POST /v1/chat/completions` named it.
+   *
+   * Kept so a resumed stream can stamp its chunks with the same `model` the
+   * original stream did — the engine knows the run's provider and model id,
+   * but the route is the completions surface's own vocabulary and lives
+   * nowhere else. Absent for a claim that did not say.
+   */
+  readonly route: string | undefined;
+  /**
    * The caller asked to be shown permission prompts.
    *
    * The one thing the claim has to say, because it changes what the *feed*
@@ -191,6 +200,8 @@ export interface RunDirectory {
     readonly runId: RunId;
     readonly connectionId: string;
     readonly permissions: boolean;
+    /** See {@link RunRecord.route}. */
+    readonly route?: string;
   }): void;
 
   /** May this connection address this run at all? The only authorisation there is. */
@@ -208,6 +219,21 @@ export interface RunDirectory {
 
   /** The client walked away and the run was kept. Starts the run's own deadline. */
   noteDetached(runId: RunId): void;
+
+  /**
+   * A client attached to the run's stream again.
+   *
+   * The inverse of {@link noteDetached}, and the thing that makes a resumed
+   * stream a real attachment rather than a touch: the detached-run deadline
+   * stops, because the run is no longer abandoned, and the park deadline on
+   * its open prompts starts, because somebody is now in front of them again —
+   * the same somebody who would have been asked had the socket held. No-op for
+   * a run that has ended.
+   */
+  noteAttached(runId: RunId): void;
+
+  /** The route a claimed run was started on, when the claim said. */
+  routeOf(runId: RunId): string | undefined;
 
   /**
    * Somebody just addressed this run through an authorised route.
@@ -319,6 +345,7 @@ export function createRunDirectory(options: RunDirectoryOptions): RunDirectory {
       if (records.has(input.runId)) return;
       records.set(input.runId, {
         connectionId: input.connectionId,
+        route: input.route,
         permissions: input.permissions,
         detachedAt: undefined,
         ended: false,
@@ -352,6 +379,21 @@ export function createRunDirectory(options: RunDirectoryOptions): RunDirectory {
       const record = records.get(runId);
       if (record !== undefined && record.detachedAt !== undefined) record.detachedAt = now();
     },
+
+    noteAttached: (runId) => {
+      const record = records.get(runId);
+      if (record === undefined || record.ended) return;
+      record.detachedAt = undefined;
+      /*
+       * The prompts that waited for this client are counted from now, not from
+       * when they were raised: a question asked an hour ago into an empty room
+       * has not been ignored for an hour by the person who just walked in.
+       */
+      const at = now();
+      for (const requestId of [...record.parked.keys()]) record.parked.set(requestId, at);
+    },
+
+    routeOf: (runId) => records.get(runId)?.route,
 
     noteAnswered: (runId, requestId) => {
       records.get(runId)?.parked.delete(requestId);

@@ -52,7 +52,11 @@
  *    module's part is small and precise: it stops interrupting on teardown and
  *    reports the detach to whoever is keeping the deadline. It does *not* take
  *    ownership of the run's eventual death, because a generator nobody is
- *    pulling from cannot enforce a timeout — see `runs.ts`.
+ *    pulling from cannot enforce a timeout — see `runs.ts`. The other half of
+ *    the promise is {@link resumeTurn}: a detached run's client comes back on
+ *    `GET /api/v0/runs/{id}/stream?after=N` and is replayed everything after
+ *    the last chunk it rendered, then follows the run live — which is what
+ *    makes detaching a feature rather than a slower way to lose the answer.
  *
  * A request that sets neither is served byte for byte as it was before either
  * existed, which is the property the whole design is arranged around.
@@ -337,6 +341,15 @@ function flattenContent(content: OpenAiChatMessage['content']): string {
 /** What a finished turn produced. */
 export interface TurnResult {
   readonly text: string;
+  /**
+   * The agent's reasoning, joined, when the provider reported any.
+   *
+   * Kept apart from {@link text} for the reason the file comment on
+   * `openai.ts` gives: a caller reading the answer must never be handed the
+   * model's working-out as though it were the reply. Absent, not empty, when
+   * there was none — a field that is present says the model reasoned.
+   */
+  readonly thinking?: string;
   readonly finishReason: OpenAiFinishReason;
   readonly endReason: RunEndReason;
   readonly sessionId?: string;
@@ -346,9 +359,22 @@ export interface TurnResult {
   readonly error?: string;
 }
 
-/** One streamed piece of a turn. */
-export type TurnEvent =
+/** One streamed piece of a turn, before its cursor is stamped on. See {@link TurnEvent}. */
+type TurnEventBody =
   | { readonly kind: 'text'; readonly text: string }
+  | {
+      /**
+       * A fragment of the agent's reasoning, as it thinks.
+       *
+       * Its own kind rather than a flag on `text`, because the two must never
+       * be confused downstream: `text` becomes `content`, which is the answer,
+       * and this becomes `reasoning_content`, which is not. Only the agent's
+       * own — a subagent's reasoning is that subagent's business, reported to
+       * the caller as the activity that spawned it.
+       */
+      readonly kind: 'thinking';
+      readonly text: string;
+    }
   | { readonly kind: 'activity'; readonly activity: ArtemisActivity }
   | {
       /**
@@ -399,7 +425,317 @@ export type TurnEvent =
       readonly kind: 'session';
       readonly sessionId: string;
     }
+  | {
+      /**
+       * Part of what a resumed client asked for is gone.
+       *
+       * The server retains a bounded tail of a run's events. A client whose
+       * cursor is older than the tail's head is sent what remains, and this,
+       * first, so it can say that something between the two is missing rather
+       * than splice the halves together as though nothing were.
+       */
+      readonly kind: 'gap';
+      readonly afterSeq: number;
+      readonly firstSeq: number;
+    }
   | { readonly kind: 'done'; readonly result: TurnResult };
+
+/**
+ * One streamed piece of a turn.
+ *
+ * `seq` is the sequence number of the run event this piece was translated
+ * from, and it is the resume cursor: a client that loses its stream remembers
+ * the last one it rendered and asks {@link resumeTurn} for everything after
+ * it. Absent on the pieces that come from nowhere in the event stream — the
+ * run announcement, a session id learned from the run handle — which a client
+ * can receive twice without harm.
+ */
+export type TurnEvent = TurnEventBody & { readonly seq?: number };
+
+/* -------------------------------------------------------------------------- */
+/* Translating a run's events                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One run's events, read into the reply's vocabulary.
+ *
+ * This translation used to live inline in {@link runTurn}, and it moved into
+ * a class the day a second reader appeared: {@link resumeTurn} replays a run's
+ * retained events for a client that lost its stream, and "what a text delta
+ * becomes on the wire" has to have exactly one answer, or the client that
+ * stayed and the client that came back would be shown two different turns.
+ * Everything stateful about the translation lives here — the text seen so
+ * far, the reasoning block in progress, which session id has been announced,
+ * the activity report — and the two generators own the I/O around it.
+ *
+ * One event may become several {@link TurnEvent}s or none. Each carries the
+ * `seq` of the event it came from, which is what a resume cursor points at.
+ * The translation performs no I/O: the one thing it cannot do for itself, the
+ * standing denial of a permission prompt on an unattended turn, it hands back
+ * as `deny` for the caller to send.
+ */
+class TurnTranslator {
+  text = '';
+  thinking = '';
+  /** The reasoning block being relayed, so a new one is set off from the last. */
+  #thinkingBlock: string | undefined;
+  /*
+   * Seeded from the request when resuming a session, and that is a fix rather
+   * than a convenience.
+   *
+   * A *new* session announces itself with `session.started`, so the id is
+   * observed. A *resumed* one does not — the session already started, on an
+   * earlier turn — and providers do not always repeat it on `run.end` either.
+   * The response therefore came back with no `sessionId` from the second turn
+   * onward, so a client following the documented pattern (send back what you
+   * were given) lost the thread after exactly one exchange. Caught by holding
+   * a real two-turn conversation with a Codex account.
+   *
+   * Echoing the id we were handed is honest: this turn did run in that
+   * session, which is precisely what the field means. Anything the run reports
+   * later overwrites it.
+   */
+  sessionId: string | undefined;
+  /**
+   * The id the caller has already been told, so a fresh session is announced
+   * exactly once and a resumed one — whose caller sent the id in — not at all.
+   * See the `session` member of {@link TurnEventBody}.
+   */
+  #announced: string | undefined;
+  usage: OpenAiUsage | undefined;
+  deniedPermission = false;
+  readonly activity: ArtemisActivity[] = [];
+  /** Set by the `run.end` this saw. The turn is over from then on. */
+  result: TurnResult | undefined;
+  readonly #remotePermissions: boolean;
+
+  constructor(options: { readonly remotePermissions: boolean; readonly sessionId?: string }) {
+    this.#remotePermissions = options.remotePermissions;
+    this.sessionId = options.sessionId;
+    this.#announced = options.sessionId;
+  }
+
+  /** Announce a session id learned outside the event stream — the run handle's. */
+  announce(sessionId: string | undefined): readonly TurnEvent[] {
+    if (sessionId !== undefined) this.sessionId = sessionId;
+    if (this.sessionId === undefined || this.sessionId === this.#announced) return [];
+    this.#announced = this.sessionId;
+    return [{ kind: 'session', sessionId: this.sessionId }];
+  }
+
+  /**
+   * Read one event.
+   *
+   * `deny` names a permission request the caller must answer with the
+   * standing denial: only ever on a turn whose caller did not ask to be shown
+   * prompts, and only ever the caller's to send.
+   */
+  translate(event: AgentEvent): { readonly events: readonly TurnEvent[]; readonly deny?: string } {
+    const out: TurnEvent[] = [];
+    const seq = event.seq;
+
+    switch (event.type) {
+      case 'session.started':
+        this.sessionId = String(event.sessionId);
+        if (this.sessionId !== this.#announced) {
+          this.#announced = this.sessionId;
+          out.push({ kind: 'session', sessionId: this.sessionId, seq });
+        }
+        break;
+
+      case 'text.delta':
+        /*
+         * The agent's own words only.
+         *
+         * A subagent's text arrives on the same feed, marked with the id of
+         * the call that spawned it, and it is not the answer: it is a report
+         * to the agent, which reads it and then says what it has to say. The
+         * caller sees the call itself in the activity report. Relaying the
+         * words as well handed a caller every subagent's findings inline
+         * *and then* the agent's account of them — the same answer twice, in
+         * two voices.
+         */
+        if (event.agentId !== undefined) break;
+        this.text += event.text;
+        out.push({ kind: 'text', text: event.text, seq });
+        break;
+
+      case 'text.complete':
+        /*
+         * Only when nothing streamed.
+         *
+         * Providers that stream emit deltas *and* a completing block with the
+         * whole text; appending both would double every reply. `partialMessages`
+         * says which a provider does, but the honest check is whether anything
+         * actually arrived — an adapter that claims streaming and sends none
+         * would otherwise produce an empty answer.
+         *
+         * Never a replayed block: a resumed conversation reads its history
+         * back through the same event, and a previous turn's answer is not
+         * this turn's. Same rule for a subagent's block as for its deltas.
+         */
+        if (event.agentId !== undefined || event.replay === true) break;
+        if (event.role === 'assistant' && this.text.length === 0) {
+          this.text += event.text;
+          out.push({ kind: 'text', text: event.text, seq });
+        }
+        break;
+
+      case 'thinking.delta': {
+        /*
+         * Forwarded on its own channel, never into `text`.
+         *
+         * A redacted block has nothing to show — the provider kept the
+         * reasoning and sent a signature — and an empty fragment is not a
+         * delivery, so neither crosses the wire. The subagent rule is the
+         * one `text.delta` gives.
+         *
+         * The wire has no blocks, only fragments, so the boundary between
+         * two reasoning blocks — one either side of a tool call, typically —
+         * travels as a paragraph break. Without it the last word of one and
+         * the first of the next arrive glued together, on the stream and in
+         * the whole reply alike.
+         */
+        if (event.agentId !== undefined || event.redacted === true || event.text === '') break;
+        const block = `${event.messageId}:${String(event.blockIndex)}`;
+        const fragment =
+          this.#thinkingBlock === undefined || this.#thinkingBlock === block
+            ? event.text
+            : `\n\n${event.text}`;
+        this.#thinkingBlock = block;
+        this.thinking += fragment;
+        out.push({ kind: 'thinking', text: fragment, seq });
+        break;
+      }
+
+      case 'tool.start': {
+        const summary = summariseToolInput(event.input);
+        const entry: ArtemisActivity = {
+          tool: event.name.toLowerCase(),
+          at: event.ts,
+          ...(summary === undefined ? {} : { summary }),
+        };
+        this.activity.push(entry);
+        out.push({ kind: 'activity', activity: entry, seq });
+        break;
+      }
+
+      case 'permission.request':
+        /*
+         * Denied on the spot, unless the caller said there is somebody there.
+         *
+         * The default is the old one and the message is written for the
+         * *model*: it explains the constraint so the agent can choose another
+         * route, rather than reading as a fault.
+         *
+         * The opted-in path answers nothing here, and that is the design
+         * rather than an omission. The decision arrives on a different
+         * request — often on a different socket, minutes later, after this
+         * stream has died — so parking is simply *not replying*: the adapter
+         * is already blocked, and `runs.ts` holds the deadline that stops it
+         * being blocked forever. All this branch owes the client is the
+         * question.
+         */
+        if (this.#remotePermissions) {
+          out.push({ kind: 'permission', notice: { status: 'requested', request: event.request }, seq });
+          break;
+        }
+        this.deniedPermission = true;
+        return { events: out, deny: String(event.requestId) };
+
+      case 'permission.resolved':
+        // Only for the client that was told about the request in the first
+        // place. A turn on the standing denial saw no question, so news that
+        // the question is closed would be an event about nothing.
+        if (this.#remotePermissions) {
+          out.push({
+            kind: 'permission',
+            notice: {
+              status: 'resolved',
+              requestId: event.requestId,
+              outcome: event.outcome,
+              ...(event.note === undefined ? {} : { note: event.note }),
+            },
+            seq,
+          });
+        }
+        break;
+
+      case 'usage':
+        this.usage = toOpenAiUsage(event.usage.tokens);
+        break;
+
+      case 'run.end': {
+        if (event.sessionId !== undefined) this.sessionId = String(event.sessionId);
+        if (event.usage !== undefined) this.usage = toOpenAiUsage(event.usage.tokens);
+        // The provider's own summary, when it wrote one and nothing streamed.
+        if (this.text.length === 0 && event.result !== undefined) this.text = event.result;
+
+        this.result = {
+          text: this.text,
+          ...(this.thinking.length === 0 ? {} : { thinking: this.thinking }),
+          finishReason: finishReasonFor(event.reason),
+          endReason: event.reason,
+          ...(this.sessionId === undefined ? {} : { sessionId: this.sessionId }),
+          ...(this.usage === undefined ? {} : { usage: this.usage }),
+          activity: this.activity,
+          ...(event.reason === 'error' ? { error: event.error?.message ?? 'The run failed.' } : {}),
+          ...(this.deniedPermission && event.reason === 'permission_denied'
+            ? { error: 'The agent needed permission that no one was present to give.' }
+            : {}),
+        };
+        out.push({ kind: 'done', result: this.result, seq });
+        break;
+      }
+
+      default:
+        // `tool.end`, `background.tasks`, and the rest. Not silently dropped
+        // by accident — none of them has a place in an OpenAI reply. (Thinking
+        // has its own case above, and its own field on the wire, precisely
+        // so it is never concatenated into `content`, where a caller would
+        // read a model's private reasoning as its answer.)
+        break;
+    }
+
+    return { events: out };
+  }
+}
+
+/**
+ * A queue between the engine's callback and a `for await`.
+ *
+ * The subscription is attached *before* the run is started or replayed — a
+ * fast provider can emit `session.started` and text before a promise settles,
+ * and a listener attached afterwards would miss the opening of the turn.
+ * `runId` is null only in the window before `startRun` resolves; events for
+ * *other* runs are filtered by the caller, which is why one global
+ * subscription is enough for any number of concurrent turns.
+ */
+function subscribeQueue(
+  source: RunSource,
+  accept: (event: AgentEvent) => boolean,
+): {
+  readonly pending: AgentEvent[];
+  /** Wait for the next event, or for the slice to elapse. */
+  readonly wait: () => Promise<void>;
+  readonly unsubscribe: () => void;
+} {
+  const pending: AgentEvent[] = [];
+  let notify: (() => void) | null = null;
+  const unsubscribe = source.subscribe((event) => {
+    if (!accept(event)) return;
+    pending.push(event);
+    notify?.();
+  });
+  const wait = async (): Promise<void> => {
+    await new Promise<void>((resolve) => {
+      notify = resolve;
+      setTimeout(resolve, 250);
+    });
+    notify = null;
+  };
+  return { pending, wait, unsubscribe };
+}
 
 /**
  * Start a run and yield its progress until it ends.
@@ -431,54 +767,13 @@ export async function* runTurn(
   const detachable = turn.extensions.remote?.detach === true && turn.onDetach !== undefined;
   const remotePermissions = turn.extensions.remote?.permissions === true;
 
-  /*
-   * A queue, because events arrive by callback and are consumed by `for await`.
-   *
-   * The subscription is attached *before* `startRun` resolves — a fast provider
-   * can emit `session.started` and text before the promise settles, and a
-   * listener attached afterwards would miss the opening of the turn.
-   */
-  const pending: AgentEvent[] = [];
-  let notify: (() => void) | null = null;
   let ended = false;
   let runId: RunId | null = null;
-
-  const unsubscribe = source.subscribe((event) => {
-    // `runId` is null only in the window before `startRun` resolves; events for
-    // *other* runs are filtered here, which is why one global subscription is
-    // enough for any number of concurrent turns.
-    if (runId !== null && event.runId !== runId) return;
-    pending.push(event);
-    notify?.();
+  const queue = subscribeQueue(source, (event) => runId === null || event.runId === runId);
+  const translator = new TurnTranslator({
+    remotePermissions,
+    ...(turn.extensions.sessionId === undefined ? {} : { sessionId: turn.extensions.sessionId }),
   });
-
-  const activity: ArtemisActivity[] = [];
-  let text = '';
-  /*
-   * Seeded from the request when resuming, and that is a fix rather than a
-   * convenience.
-   *
-   * A *new* session announces itself with `session.started`, so the id is
-   * observed. A *resumed* one does not — the session already started, on an
-   * earlier turn — and providers do not always repeat it on `run.end` either.
-   * The response therefore came back with no `sessionId` from the second turn
-   * onward, so a client following the documented pattern (send back what you
-   * were given) lost the thread after exactly one exchange. Caught by holding a
-   * real two-turn conversation with a Codex account.
-   *
-   * Echoing the id we were handed is honest: this turn did run in that session,
-   * which is precisely what the field means. Anything the run reports later
-   * overwrites it.
-   */
-  let sessionId: string | undefined = turn.extensions.sessionId;
-  /*
-   * The id the caller has already been told, so a fresh session is announced
-   * exactly once and a resumed one — whose caller sent the id in — not at all.
-   * See the `session` member of {@link TurnEvent}.
-   */
-  let announced: string | undefined = turn.extensions.sessionId;
-  let usage: OpenAiUsage | undefined;
-  let deniedPermission = false;
 
   try {
     let handle: RunHandle;
@@ -517,14 +812,11 @@ export async function* runTurn(
 
     runId = handle.runId;
     yield { kind: 'run', runId };
-    if (handle.sessionId !== undefined) sessionId = String(handle.sessionId);
-    if (sessionId !== undefined && sessionId !== announced) {
-      announced = sessionId;
-      yield { kind: 'session', sessionId };
-    }
+    yield* translator.announce(handle.sessionId === undefined ? undefined : String(handle.sessionId));
 
     // Events that arrived while `startRun` was in flight were queued with no
     // filter; drop any that turned out to belong to another run.
+    const { pending } = queue;
     for (let index = pending.length - 1; index >= 0; index -= 1) {
       if (pending[index]?.runId !== runId) pending.splice(index, 1);
     }
@@ -546,147 +838,27 @@ export async function* runTurn(
           // Keep draining: the run answers the interrupt with a `run.end`, and
           // leaving without it would strand the subscription.
         }
-        await new Promise<void>((resolve) => {
-          notify = resolve;
-          setTimeout(resolve, 250);
-        });
-        notify = null;
+        await queue.wait();
         continue;
       }
 
       const event = pending.shift();
       if (event === undefined) continue;
 
-      switch (event.type) {
-        case 'session.started':
-          sessionId = String(event.sessionId);
-          if (sessionId !== announced) {
-            announced = sessionId;
-            yield { kind: 'session', sessionId };
-          }
-          break;
-
-        case 'text.delta':
-          text += event.text;
-          yield { kind: 'text', text: event.text };
-          break;
-
-        case 'text.complete':
-          /*
-           * Only when nothing streamed.
-           *
-           * Providers that stream emit deltas *and* a completing block with the
-           * whole text; appending both would double every reply. `partialMessages`
-           * says which a provider does, but the honest check is whether anything
-           * actually arrived — an adapter that claims streaming and sends none
-           * would otherwise produce an empty answer.
-           */
-          if (event.role === 'assistant' && text.length === 0) {
-            text += event.text;
-            yield { kind: 'text', text: event.text };
-          }
-          break;
-
-        case 'tool.start': {
-          const entry: ArtemisActivity = {
-            tool: event.name.toLowerCase(),
-            at: Date.now(),
-            ...(summariseToolInput(event.input) === undefined
-              ? {}
-              : { summary: summariseToolInput(event.input) }),
-          };
-          activity.push(entry);
-          yield { kind: 'activity', activity: entry };
-          break;
-        }
-
-        case 'permission.request':
-          /*
-           * Denied on the spot, unless the caller said there is somebody there.
-           *
-           * The default is the old one and the message is written for the
-           * *model*: it explains the constraint so the agent can choose another
-           * route, rather than reading as a fault.
-           *
-           * The opted-in path answers nothing here, and that is the design
-           * rather than an omission. The decision arrives on a different
-           * request — often on a different socket, minutes later, after this
-           * stream has died — so parking is simply *not replying*: the adapter
-           * is already blocked, and `runs.ts` holds the deadline that stops it
-           * being blocked forever. All this branch owes the client is the
-           * question.
-           */
-          if (remotePermissions) {
-            yield { kind: 'permission', notice: { status: 'requested', request: event.request } };
-            break;
-          }
-          deniedPermission = true;
-          await source
-            .respondToPermission(runId, String(event.requestId), {
-              behavior: 'deny',
-              message: UNATTENDED_PERMISSION_MESSAGE,
-            })
-            .catch(() => undefined);
-          break;
-
-        case 'permission.resolved':
-          // Only for the client that was told about the request in the first
-          // place. A turn on the standing denial saw no question, so news that
-          // the question is closed would be an event about nothing.
-          if (remotePermissions) {
-            yield {
-              kind: 'permission',
-              notice: {
-                status: 'resolved',
-                requestId: event.requestId,
-                outcome: event.outcome,
-                ...(event.note === undefined ? {} : { note: event.note }),
-              },
-            };
-          }
-          break;
-
-        case 'usage':
-          usage = toOpenAiUsage(event.usage.tokens);
-          break;
-
-        case 'run.end': {
-          ended = true;
-          if (event.sessionId !== undefined) sessionId = String(event.sessionId);
-          if (event.usage !== undefined) usage = toOpenAiUsage(event.usage.tokens);
-          // The provider's own summary, when it wrote one and nothing streamed.
-          if (text.length === 0 && event.result !== undefined) text = event.result;
-
-          yield {
-            kind: 'done',
-            result: {
-              text,
-              finishReason: finishReasonFor(event.reason),
-              endReason: event.reason,
-              ...(sessionId === undefined ? {} : { sessionId }),
-              ...(usage === undefined ? {} : { usage }),
-              activity,
-              ...(event.reason === 'error'
-                ? { error: event.error?.message ?? 'The run failed.' }
-                : {}),
-              ...(deniedPermission && event.reason === 'permission_denied'
-                ? { error: 'The agent needed permission that no one was present to give.' }
-                : {}),
-            },
-          };
-          break;
-        }
-
-        default:
-          // `thinking.delta`, `tool.end`, `background.tasks`. Not silently
-          // dropped by accident — none of them has a place in an OpenAI reply,
-          // and thinking in particular must not be concatenated into `content`,
-          // where a caller would read a model's private reasoning as its answer.
-          break;
+      const { events, deny } = translator.translate(event);
+      if (deny !== undefined) {
+        await source
+          .respondToPermission(runId, deny, {
+            behavior: 'deny',
+            message: UNATTENDED_PERMISSION_MESSAGE,
+          })
+          .catch(() => undefined);
       }
+      if (event.type === 'run.end') ended = true;
+      yield* events;
     }
   } finally {
-    unsubscribe();
+    queue.unsubscribe();
 
     /*
      * Interrupt on *any* teardown, not just an observed abort.
@@ -721,6 +893,112 @@ export async function* runTurn(
         await source.disposeRun(runId).catch(() => undefined);
       }
     }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Picking a run back up                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** What a client that lost its stream asks for. */
+export interface ResumeRequest {
+  readonly runId: RunId;
+  /**
+   * The last `seq` the client rendered. Everything after it is replayed;
+   * absent means everything the server still holds, which is right for a
+   * client whose stream died before it saw a single numbered piece.
+   */
+  readonly afterSeq?: number;
+  /** Aborts when the client hangs up again. */
+  readonly signal?: TurnRequest['signal'];
+  /**
+   * Told when the client walked away again before the run ended. The same
+   * handover {@link TurnRequest.onDetach} makes, for the same reason: a run
+   * that has already outlived one socket is nobody's to end on the next.
+   */
+  readonly onDetach?: (runId: RunId) => void;
+}
+
+/**
+ * Pick a run back up from its retained events, then follow it live.
+ *
+ * The other half of `artemis.remote.detach`. Detaching kept the run alive when
+ * its client vanished; until this existed nothing brought the client back, so
+ * a laptop that slept through a turn woke to an error and a run it could only
+ * read as history. Now the client asks for everything after the last piece it
+ * rendered, and gets the same pieces, translated the same way, that it would
+ * have received had the socket held.
+ *
+ * Two things this deliberately does not do:
+ *
+ *  - **It never denies a prompt.** A run that can be resumed is one whose
+ *    caller asked for detachment, and the prompts it raised while nobody was
+ *    attached are exactly what the caller is coming back for — `runs.ts`
+ *    suspends their deadline for the same reason. They are put on the wire as
+ *    questions, as they were the first time.
+ *  - **It never interrupts or disposes.** The run's lifetime belongs to the
+ *    turn that started it and to the directory's own deadline; a stream that
+ *    merely watches has no business ending what it watches. When the client
+ *    goes again, the run is handed back to the directory exactly as before.
+ *
+ * The replay is read *after* the live subscription is attached, so nothing
+ * emitted between the two can be missed, and whatever arrives twice — retained
+ * and queued — is deduplicated by `seq`: an event's translation is sent at most
+ * once, in order. A retained buffer that has dropped its head cannot be
+ * replayed from before its first event; what remains is still sent, which is
+ * more than the nothing the client had.
+ */
+export async function* resumeTurn(
+  source: RunSource,
+  request: ResumeRequest,
+): AsyncGenerator<TurnEvent> {
+  const { runId } = request;
+  const after = request.afterSeq ?? -1;
+  const queue = subscribeQueue(source, (event) => event.runId === runId);
+  // Nobody is denied on a resumed stream; see the function comment.
+  const translator = new TurnTranslator({ remotePermissions: true });
+  let ended = false;
+  let lastSeq = -1;
+
+  const relay = function* (event: AgentEvent): Generator<TurnEvent> {
+    if (event.seq <= lastSeq) return;
+    lastSeq = event.seq;
+    const { events } = translator.translate(event);
+    if (event.type === 'run.end') ended = true;
+    if (event.seq > after) yield* events;
+  };
+
+  try {
+    const replay =
+      source.runEvents === undefined
+        ? { events: [] as readonly AgentEvent[], truncated: false }
+        : await source.runEvents({ runId });
+
+    // The run id first, as on the original stream: a client rebuilding from
+    // nothing learns the address before anything addressed to it.
+    yield { kind: 'run', runId };
+    const first = replay.events[0]?.seq;
+    if (first !== undefined && first > after + 1) {
+      yield { kind: 'gap', afterSeq: after, firstSeq: first };
+    }
+    for (const event of replay.events) yield* relay(event);
+    if (ended) return;
+
+    const { pending } = queue;
+    while (!ended) {
+      if (pending.length === 0) {
+        // The client went away again. `finally` hands the run back.
+        if (request.signal?.aborted === true) return;
+        await queue.wait();
+        continue;
+      }
+      const event = pending.shift();
+      if (event === undefined) continue;
+      yield* relay(event);
+    }
+  } finally {
+    queue.unsubscribe();
+    if (!ended) request.onDetach?.(runId);
   }
 }
 
@@ -785,7 +1063,11 @@ export function chatResponse(input: {
     choices: [
       {
         index: 0,
-        message: { role: 'assistant', content: result.text },
+        message: {
+          role: 'assistant',
+          content: result.text,
+          ...(result.thinking === undefined ? {} : { reasoning_content: result.thinking }),
+        },
         finish_reason: result.finishReason,
       },
     ],
@@ -811,7 +1093,11 @@ export function chatChunk(input: {
   readonly id: string;
   readonly model: string;
   readonly created: number;
-  readonly delta: { readonly role?: 'assistant'; readonly content?: string };
+  readonly delta: {
+    readonly role?: 'assistant';
+    readonly content?: string;
+    readonly reasoning_content?: string;
+  };
   readonly finishReason?: OpenAiFinishReason;
   readonly usage?: OpenAiUsage;
   readonly artemis?: OpenAiChatChunk['artemis'];

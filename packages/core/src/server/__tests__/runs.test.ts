@@ -554,3 +554,50 @@ describe('the deadlines on a run nobody is watching', () => {
     expect(engine.calls).toEqual([]);
   });
 });
+
+describe('a client that comes back', () => {
+  it('stops the abandoned-run clock and starts the parked prompts\' one', async () => {
+    /*
+     * The mirror image of detaching. A detached run's prompt waits without a
+     * deadline — nobody is there to answer it — and the run itself is reaped
+     * after the TTL. A client attaching to the run's stream is somebody being
+     * there again: the run is no longer abandoned, and the question in front
+     * of the person who just walked in is counted from now.
+     */
+    const { engine, directory, advance } = harness({ ttlMs: 60_000, parkMs: 10_000 });
+    directory.claim({ runId: 'run-1' as never, connectionId: 'conn-1', permissions: true, route: 'work-max/opus' });
+    directory.noteDetached('run-1' as never);
+    engine.emit({
+      type: 'permission.request',
+      requestId: 'perm-1',
+      request: { id: 'perm-1', toolName: 'Bash', input: {} },
+    } as never);
+
+    // Detached: the prompt waits past its deadline, untouched.
+    advance(30_000);
+    await directory.sweep();
+    expect(engine.calls.map((call) => call.name)).toEqual([]);
+
+    directory.noteAttached('run-1' as never);
+    expect(directory.routeOf('run-1' as never)).toBe('work-max/opus');
+
+    // Attached: the run's own deadline is off, however long it has been.
+    advance(60_000);
+    await directory.sweep();
+    expect(engine.calls.map((call) => call.name)).toEqual(['respondToPermission']);
+    expect(engine.calls[0]?.args[1]).toBe('perm-1');
+    // …and the prompt was denied ten seconds after the attach, not thirty
+    // seconds before it: the clock restarted when somebody arrived.
+    expect(engine.calls.some((call) => call.name === 'interrupt')).toBe(false);
+  });
+
+  it('does not resurrect a run that has ended', async () => {
+    const { engine, directory, advance } = harness({ ttlMs: 60_000 });
+    directory.claim({ runId: 'run-1' as never, connectionId: 'conn-1', permissions: false });
+    engine.emit({ type: 'run.end', reason: 'completed' } as never);
+    directory.noteAttached('run-1' as never);
+    advance(120_000);
+    await directory.sweep();
+    expect(directory.owns('conn-1', 'run-1' as never)).toBe(false);
+  });
+});

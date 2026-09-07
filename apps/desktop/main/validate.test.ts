@@ -1606,3 +1606,37 @@ describe('validateMemoryBankAdd with a secret reference', () => {
     ).toEqual({ ref });
   });
 });
+
+describe('validateAgentPromptsSave: built-ins the user removed', () => {
+  const row = { id: 'p1', name: 'House style', markdown: 'x', enabled: true, scope: { kind: 'all' } };
+
+  it('carries a dismissal that names a prompt this build ships', () => {
+    const { document } = validateAgentPromptsSave({
+      document: { version: 1, prompts: [row], dismissedBuiltIns: ['builtin:cerebro'] },
+    });
+    expect(document.dismissedBuiltIns).toEqual(['builtin:cerebro']);
+  });
+
+  it('writes no field when there is nothing to say', () => {
+    for (const dismissed of [undefined, null, []]) {
+      const { document } = validateAgentPromptsSave({
+        document: { version: 1, prompts: [row], dismissedBuiltIns: dismissed },
+      });
+      expect(document).not.toHaveProperty('dismissedBuiltIns');
+    }
+  });
+
+  it('refuses a dismissal that names nothing this build ships, and a non-array', () => {
+    expect(() =>
+      validateAgentPromptsSave({
+        document: { version: 1, prompts: [row], dismissedBuiltIns: ['builtin:nope'] },
+      }),
+    ).toThrow(ValidationError);
+    expect(() =>
+      validateAgentPromptsSave({
+        document: { version: 1, prompts: [row], dismissedBuiltIns: 'builtin:cerebro' },
+      }),
+    ).toThrow(ValidationError);
+  });
+});
+
