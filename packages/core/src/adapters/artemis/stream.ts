@@ -22,6 +22,12 @@ export interface ServerExtensionsDelta {
   readonly activity?: readonly ArtemisActivity[];
   readonly endReason?: string;
   /**
+   * What the server accepted and set aside, by name — `artemis.systemPrompt`
+   * when the serving account's provider cannot append standing instructions.
+   * On the first chunk of a stream, so the run can say so before it answers.
+   */
+  readonly ignored?: readonly string[];
+  /**
    * The server's own run id, announced once and early on a turn that opted into
    * a remote feature. Distinct from the adapter's local run id — this is the
    * address every native `/api/v0/runs/{id}` route takes, so it is learned off
@@ -137,6 +143,11 @@ function readExtensions(value: unknown): ServerExtensionsDelta | undefined {
   if (resolvedModel !== undefined) out.resolvedModel = resolvedModel;
   const endReason = asString(record['endReason']);
   if (endReason !== undefined) out.endReason = endReason;
+  const ignored = record['ignored'];
+  if (Array.isArray(ignored)) {
+    const names = ignored.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+    if (names.length > 0) out.ignored = names;
+  }
   const runId = asString(record['runId']);
   if (runId !== undefined) out.runId = runId;
   const error = asString(record['error']);

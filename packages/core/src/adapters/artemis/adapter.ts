@@ -396,6 +396,8 @@ class ArtemisRun implements Run {
    */
   #heartbeats = false;
   #notices = 0;
+  /** Whether the "instructions set aside" notice has been said. Once per run. */
+  #instructionsDropped = false;
 
   constructor(input: ResolvedRunInput, reconnect: Required<ArtemisReconnectOptions>) {
     this.runId = input.runId;
@@ -725,6 +727,20 @@ class ArtemisRun implements Run {
   #apply(delta: ServerStreamDelta, stream: StreamState): void {
     const extensions = delta.artemis;
     if (extensions?.sessionId !== undefined) this.#noteSession(extensions.sessionId);
+    /*
+     * The server set the standing instructions aside: the serving account's
+     * provider has no system-prompt append. Said once, in the transcript, in
+     * the same synthetic voice a dropped link speaks in — because the pane on
+     * this side lists the prompt as active, and a run that quietly went without
+     * it is the failure the capability flag exists to prevent. The user's cure
+     * is on the picker: an account whose provider can take instructions.
+     */
+    if (extensions?.ignored?.includes('artemis.systemPrompt') === true && !this.#instructionsDropped) {
+      this.#instructionsDropped = true;
+      this.#notice(
+        "The serving account's provider cannot take standing instructions, so this run started without your prompt library. Pick an account on a provider that can (Claude, or a local model) to have them apply.",
+      );
+    }
     // Learned like the session id: the server announces it once and early,
     // and every native run route addresses it from here on.
     if (extensions?.runId !== undefined) this.#remoteRunId = extensions.runId as RunId;

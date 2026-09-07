@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { RunInput } from '@rx-artemis/protocol';
 
-import { mergeAdditionalDirectories, rememberModels, withSystemPromptAppended } from './engine.js';
+import { builtInsFor, mergeAdditionalDirectories, rememberModels, withSystemPromptAppended } from './engine.js';
 
 const RUN: RunInput = {
   providerId: 'claude',
@@ -171,5 +171,22 @@ describe('rememberModels', () => {
 
   it('merges a model that came back rather than listing it twice', () => {
     expect(rememberModels([FABLE_5_1], [FABLE_5_1, SONNET])).toEqual([FABLE_5_1, SONNET]);
+  });
+});
+
+describe('builtInsFor', () => {
+  const every = new Set<'builtin:cerebro'>(['builtin:cerebro']);
+
+  it('keeps the memory-bank prompt for a provider that runs here', () => {
+    expect(builtInsFor('claude', every)).toBe(every);
+    expect(builtInsFor('llamacpp', every)).toBe(every);
+  });
+
+  it('keeps it home for a run an Artemis server executes elsewhere', () => {
+    // The prompt names this machine's banks and this machine's CLI path; the
+    // server describes its own. The user's prompts are not built-ins and are
+    // unaffected by this set.
+    expect(builtInsFor('artemis', every).has('builtin:cerebro')).toBe(false);
+    expect(builtInsFor('artemis', new Set())).toEqual(new Set());
   });
 });

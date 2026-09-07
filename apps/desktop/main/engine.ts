@@ -166,6 +166,30 @@ const MAX_SESSION_TITLE = 200;
  * the input back untouched, which is what keeps an empty library from putting
  * an `append` carrying nothing on every run.
  */
+/**
+ * The built-ins a run on this provider may carry.
+ *
+ * The memory-bank prompt is about *this machine*: its banks' slugs, its path
+ * to the CLI, "this machine carries…". A run served by an Artemis server
+ * executes on that machine instead, which has banks of its own and describes
+ * them itself (`apps/server/src/host.ts` composes the same prompt from its own
+ * registry). Sending this machine's rendering across the wire told the agent
+ * about a Windows path to `bin\cerebro` on a Linux box. So for the `artemis`
+ * provider the built-in stays home, and only the user's own prompts cross —
+ * those are about the user, and travel with them.
+ *
+ * Pure, so the rule is the unit under test rather than the engine around it.
+ */
+export function builtInsFor(
+  providerId: string,
+  available: ReadonlySet<BuiltInPromptId>,
+): ReadonlySet<BuiltInPromptId> {
+  if (providerId !== 'artemis' || !available.has('builtin:cerebro')) return available;
+  const rest = new Set(available);
+  rest.delete('builtin:cerebro');
+  return rest;
+}
+
 export function withSystemPromptAppended(input: RunInput, text: string | undefined): RunInput {
   if (text === undefined || text.length === 0) return input;
 
@@ -848,7 +872,7 @@ function createEngine(options: EngineOptions): ArtemisEngine {
 
     try {
       const { prompts } = await agentPrompts.read();
-      const available = availableBuiltIns();
+      const available = builtInsFor(input.providerId, availableBuiltIns());
       const text = composeAgentPrompts(prompts, {
         profileId: input.profileId,
         availableBuiltIns: available,

@@ -1395,6 +1395,19 @@ export interface ArtemisChatExtensions {
    * failing — exactly what a server that never had them does today. Carrying it
    * grants the caller nothing new: it is the caller's own text, applied to the
    * caller's own run, and bounded in size where the request is validated.
+   *
+   * Honoured only where the serving account's provider can append to its
+   * preset — `ServerProfile.capabilities.systemPromptAppend`, which the
+   * catalogue publishes per account. Elsewhere (Codex, OpenCode) it is dropped
+   * and named in `artemis.ignored` as `artemis.systemPrompt`, because an
+   * instruction the model never read is worse silent than absent: the client
+   * would believe it was heard.
+   *
+   * Not the place for text about the *client's* machine. The memory-bank
+   * prompt names this machine's banks and this machine's paths, and a served
+   * run executes on the server, which describes its own banks itself; the
+   * desktop keeps that built-in off this field and sends only the user's own
+   * prompts.
    */
   readonly systemPrompt?: string;
 }
