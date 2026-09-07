@@ -62,6 +62,7 @@ export * from './server.js';
 export * from './remote.js';
 export * from './routine.js';
 export * from './sharedConfig.js';
+export * from './forge.js';
 export * from './github.js';
 export * from './update.js';
 export * from './agentPrompts.js';

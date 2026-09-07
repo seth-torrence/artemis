@@ -28,6 +28,7 @@
 import type { AgentPromptsDocument,
   MemoryBankPromptInfo,
 } from './agentPrompts.js';
+import type { RepositoryOrigin } from './forge.js';
 import type { PullRequestRef, PullRequestResult } from './github.js';
 import type { AgentEvent, BackgroundTask } from './events.js';
 import type { AgentError } from './errors.js';
@@ -1514,12 +1515,13 @@ export interface WorkspaceDescribeResponse {
    */
   readonly worktree?: boolean;
   /**
-   * The GitHub repository the project's `origin` remote names, when it names
-   * one. What lets the renderer expand a bare `#123` in a transcript into a
-   * link to the pull request — absent for any other host, because that
-   * expansion is a GitHub convention and a wrong-host link is worse than none.
+   * The repository the project's `origin` remote names, on whatever host it
+   * names it — what lets the renderer expand a bare `#123` in a transcript
+   * into a link to the pull request, spelled the way that host spells one.
+   * Absent when there is no `origin`, or one this cannot read. See
+   * `forge.ts` for the hosts it can name and the default for the rest.
    */
-  readonly github?: { readonly owner: string; readonly repo: string };
+  readonly origin?: RepositoryOrigin;
   /**
    * Is {@link path} inside the machine's temporary directory?
    *

@@ -10,36 +10,45 @@
  * This remark plugin rewrites those references into ordinary links during the
  * parse, which is the whole trick: downstream nothing changes. The anchor it
  * emits is rendered by the same `a:` component as a pasted URL, so a bare
- * `#141` gets the same state-dot, checks and size reading on hover that the
- * full URL always had — one feature, reached from both spellings.
+ * `#141` on a GitHub checkout gets the same state-dot, checks and size reading
+ * on hover that the full URL always had — one feature, reached from both
+ * spellings — and on any other host it is the link the host would have shown.
  *
  * ## Where the repository comes from
  *
- * `owner/repo#123` names its repository and needs nothing. A bare `#123` is
- * only meaningful *somewhere*, and the somewhere is the pane's working
- * directory: `WorkspaceNames.github` carries the `origin` remote's coordinates
- * when that remote points at GitHub. No remote, or a remote on another host,
- * and bare references stay text — a link invented for the wrong repository
- * would be worse than the dead text this replaces.
+ * A bare `#123` is only meaningful *somewhere*, and the somewhere is the
+ * pane's working directory: `WorkspaceNames.origin` carries the `origin`
+ * remote's repository on whatever host it lives — github.com, gitlab.com, a
+ * Forgejo on a LAN address and port — and `pullRequestUrl` spells the page
+ * the way that host does. No remote, and bare references stay text: a link
+ * invented for the wrong repository would be worse than the dead text this
+ * replaces.
+ *
+ * `owner/repo#123` names its repository, and the *host* it names is the
+ * workspace's: a checkout on a self-hosted forge that says `david/medulla#4`
+ * means the neighbouring repository there, not the same name on github.com.
+ * With no workspace to say otherwise it is read as github.com, which is what
+ * the form has always meant in prose.
  *
  * ## Deliberate misses
  *
  * Code spans and fenced blocks are never touched (`#123` in a diff hunk or a
  * shell comment is code), existing links are never re-linked, and the number
  * must be delimited the way prose delimits it — `#123abc` and `abc#123` stay
- * text. The URL is the `/pull/` form; GitHub redirects it when the number
- * turns out to be an issue, and the hover degrades to "no pull request there"
- * while the link keeps working — the same failure direction every link in
- * `PullRequestLink` is built around.
+ * text. The URL is the pull-request form for the host; GitHub and Forgejo
+ * redirect it when the number turns out to be an issue, and the hover, where
+ * there is one, degrades to "no pull request there" while the link keeps
+ * working — the same failure direction every link in `PullRequestLink` is
+ * built around.
  */
 
-import type { PullRequestRef } from '@rx-artemis/protocol';
-
-/** The coordinates a bare reference resolves against. */
-export interface RepositoryCoordinates {
-  readonly owner: string;
-  readonly repo: string;
-}
+import {
+  githubRepository,
+  pullRequestUrl,
+  siblingRepository,
+  type PullRequestRef,
+  type RepositoryOrigin,
+} from '@rx-artemis/protocol';
 
 /**
  * One reference in prose: optional `owner/repo`, a `#`, digits — delimited on
@@ -77,10 +86,23 @@ function isParent(node: unknown): node is ParentNode {
   );
 }
 
+/**
+ * The repository one reference names: its own `owner/repo`, on the
+ * workspace's forge or github.com; or the workspace's, for a bare `#n`.
+ */
+function repositoryFor(
+  owner: string | undefined,
+  repo: string | undefined,
+  fallback: RepositoryOrigin | null,
+): RepositoryOrigin | null {
+  if (owner === undefined || repo === undefined) return fallback;
+  return fallback === null ? githubRepository(owner, repo) : siblingRepository(fallback, owner, repo);
+}
+
 /** Split one text node around its references. `null` when it holds none. */
 function splitText(
   node: TextNode,
-  fallback: RepositoryCoordinates | null,
+  fallback: RepositoryOrigin | null,
 ): Array<TextNode | LinkNode> | null {
   const out: Array<TextNode | LinkNode> = [];
   let consumed = 0;
@@ -91,8 +113,7 @@ function splitText(
     const [, lead = '', reference = '', owner, repo, digits = ''] = match;
     const at = match.index + lead.length;
 
-    const target =
-      owner !== undefined && repo !== undefined ? { owner, repo } : fallback;
+    const target = repositoryFor(owner, repo, fallback);
     // A bare reference with no repository to resolve against stays text —
     // skipping the match rather than aborting, because `owner/repo#n` later in
     // the same sentence still deserves its link.
@@ -101,7 +122,7 @@ function splitText(
     if (at > consumed) out.push({ type: 'text', value: node.value.slice(consumed, at) });
     out.push({
       type: 'link',
-      url: `https://github.com/${target.owner}/${target.repo}/pull/${digits}`,
+      url: pullRequestUrl(target, digits),
       children: [{ type: 'text', value: reference }],
     });
     consumed = at + reference.length;
@@ -115,7 +136,7 @@ function splitText(
   return out;
 }
 
-function walk(node: ParentNode, fallback: RepositoryCoordinates | null): void {
+function walk(node: ParentNode, fallback: RepositoryOrigin | null): void {
   for (let index = 0; index < node.children.length; index += 1) {
     const child = node.children[index];
     if (child === undefined || OPAQUE.has(child.type)) continue;
@@ -140,12 +161,12 @@ function walk(node: ParentNode, fallback: RepositoryCoordinates | null): void {
  * argument — the caller builds one plugin array per repository and memoises
  * it, which is what keeps this off the transcript's re-render path.
  */
-export function remarkPullRequestReferences(fallback: RepositoryCoordinates | null) {
+export function remarkPullRequestReferences(fallback: RepositoryOrigin | null) {
   return () =>
     (tree: unknown): void => {
       if (isParent(tree)) walk(tree, fallback);
     };
 }
 
-/** Re-exported so callers can speak the protocol's name for a resolved ref. */
-export type { PullRequestRef };
+/** Re-exported so callers can speak the protocol's names for a repository and a resolved ref. */
+export type { PullRequestRef, RepositoryOrigin };

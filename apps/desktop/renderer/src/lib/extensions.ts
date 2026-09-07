@@ -41,7 +41,7 @@
  * folder name it replaced.
  */
 
-import type { ProfileId, ProviderId, SessionSummary } from '@rx-artemis/protocol';
+import type { ProfileId, ProviderId, RepositoryOrigin, SessionSummary } from '@rx-artemis/protocol';
 import { call, resolveBridge } from './bridge';
 
 /* -------------------------------------------------------------------------- */
@@ -221,11 +221,11 @@ export interface WorkspaceNames {
    */
   readonly projectRoot?: string;
   /**
-   * The GitHub repository the project's `origin` remote names, when it names
-   * one. What the transcript's markdown uses to expand a bare `#123` into a
-   * pull-request link.
+   * The repository the project's `origin` remote names, on whatever host it
+   * names it. What the transcript's markdown uses to expand a bare `#123`
+   * into a pull-request link spelled for that host.
    */
-  readonly github?: { readonly owner: string; readonly repo: string };
+  readonly origin?: RepositoryOrigin;
   /**
    * Is that root a linked worktree rather than an ordinary checkout?
    *
@@ -269,6 +269,6 @@ export async function describeWorkspace(path: string): Promise<WorkspaceNames | 
   const result = await call(() => bridge.workspace.describe({ path: trimmed }));
   if (!result.ok) return null;
 
-  const { name, repoName, repoRoot, projectRoot, github, worktree, temporary } = result.value;
-  return { name, repoName, repoRoot, projectRoot, github, worktree, temporary };
+  const { name, repoName, repoRoot, projectRoot, origin, worktree, temporary } = result.value;
+  return { name, repoName, repoRoot, projectRoot, origin, worktree, temporary };
 }

@@ -920,7 +920,7 @@ function AssistantRow({ item }: { readonly item: AssistantItem }): ReactElement 
   // Which repository a bare `#123` in the answer names — the directory's
   // origin, read once per workspace change. Stable for the same reason `cwd`
   // is: it moves only when the column points somewhere else.
-  const repo = usePane((s) => s.workspace?.github ?? null);
+  const origin = usePane((s) => s.workspace?.origin ?? null);
 
   return (
     <Line
@@ -946,7 +946,7 @@ function AssistantRow({ item }: { readonly item: AssistantItem }): ReactElement 
             <div className={STREAMING_TEXT}>{item.text}</div>
           ) : (
             <div className="md text-ink">
-              <Markdown files={files} repo={repo}>{item.text}</Markdown>
+              <Markdown files={files} origin={origin}>{item.text}</Markdown>
             </div>
           )}
         </BubbleContent>

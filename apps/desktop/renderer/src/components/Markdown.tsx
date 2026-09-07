@@ -65,9 +65,10 @@ import {
 } from 'react';
 import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { RepositoryOrigin } from '@rx-artemis/protocol';
 
 import { useReachableFile } from '../lib/fileReach';
-import { remarkPullRequestReferences, type RepositoryCoordinates } from '../lib/prReferences';
+import { remarkPullRequestReferences } from '../lib/prReferences';
 import { parseFileReference, resolveFilePath, type FileReference } from '../lib/filePaths';
 import { hostPlatform } from '../state/pane';
 import { CopyButton } from './primitives';
@@ -240,12 +241,12 @@ export interface MarkdownProps {
    */
   readonly files?: FileLinks;
   /**
-   * The GitHub repository bare `#123` references resolve against — the pane's
-   * working directory's `origin`, when it points at GitHub. Absent, bare
-   * references stay text and only the self-naming `owner/repo#123` form links.
-   * See `lib/prReferences.ts`.
+   * The repository bare `#123` references resolve against — the pane's
+   * working directory's `origin`, on whatever host it names. Absent, bare
+   * references stay text and only the self-naming `owner/repo#123` form links,
+   * to github.com. See `lib/prReferences.ts`.
    */
-  readonly repo?: RepositoryCoordinates | null;
+  readonly origin?: RepositoryOrigin | null;
 }
 
 /**
@@ -256,7 +257,7 @@ export interface MarkdownProps {
  * identical tree is the most expensive thing on that path — so a caller passing
  * `files` should pass a stable object, which `AssistantRow` does.
  */
-export const Markdown = memo(function Markdown({ children, files, repo }: MarkdownProps): ReactElement {
+export const Markdown = memo(function Markdown({ children, files, origin }: MarkdownProps): ReactElement {
   /*
    * One context for the whole block rather than a prop threaded through every
    * span. Note that the *reachability* subscription below it is per span and is
@@ -272,8 +273,8 @@ export const Markdown = memo(function Markdown({ children, files, repo }: Markdo
    * a different pull request and the re-parse is owed anyway.
    */
   const plugins = useMemo(
-    () => [remarkGfm, remarkPullRequestReferences(repo ?? null)],
-    [repo],
+    () => [remarkGfm, remarkPullRequestReferences(origin ?? null)],
+    [origin],
   );
 
   return (
