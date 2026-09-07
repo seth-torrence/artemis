@@ -85,13 +85,15 @@ export function ParkedAsks({ columnMax }: { readonly columnMax: string }): React
         Bounded, and scrolling inside itself. A plan is a document and an
         interview can be three questions long; either could otherwise push the
         field off the bottom of the window, which would replace one way of
-        losing the ask with another. Half the window is enough to read any
-        of them and leaves the field where the hands expect it.
+        losing the ask with another. Three fifths of the window: measured on a
+        900px-tall window, a one-question card with a note field is about 350px
+        and fits whole, and the transcript keeps its top two fifths — the ask
+        is what needs the room while it is parked.
       */}
       <div
         role="region"
         aria-label={queue.length === 1 ? 'Waiting for your answer' : `${String(queue.length)} requests waiting for your answer`}
-        className="flex max-h-[50vh] flex-col gap-1.5 overflow-y-auto"
+        className="flex max-h-[60vh] flex-col gap-1.5 overflow-y-auto"
       >
         {queue.map((request) => (
           <ParkedAsk key={request.id} request={request} />
