@@ -168,6 +168,7 @@ import { recallFold, rememberFold } from '../lib/foldMemory';
 import { formatBytes } from '../lib/attachments';
 import { detectArtifact } from '../lib/artifact';
 import { registerRowJumper } from '../lib/rowJump';
+import { FindInSession } from './FindInSession';
 import { detectFileEdit } from '@rx-artemis/transcript';
 import { previewablePath } from '../lib/preview';
 import {
@@ -462,6 +463,11 @@ export function Transcript(): ReactElement {
           <ActivityIndicator />
         </div>
       </div>
+
+      {/* ⌘F, over the conversation rather than in it: the bar floats above the
+          scroller so opening it neither reflows the transcript nor moves the
+          line someone is reading. See `FindInSession`. */}
+      <FindInSession scope={contentRef} />
 
       {showJump ? (
         <Button
@@ -1609,6 +1615,9 @@ function PermissionRow({ item }: { readonly item: PermissionItem }): ReactElemen
  * marker and the pin read as the same thing seen twice.
  */
 function ParkedMarker({ item }: { readonly item: PermissionItem }): ReactElement {
+  // The strip is this column's, and so is the request: a marker on the left
+  // must not open the pin on the right.
+  const pane = usePaneRef();
   const question = item.request.question;
   const plan = item.request.plan;
   const Icon = question ? MessageCircleQuestionMarkIcon : plan ? ClipboardListIcon : ShieldAlertIcon;
@@ -1639,7 +1648,7 @@ function ParkedMarker({ item }: { readonly item: PermissionItem }): ReactElement
         variant="ghost"
         className="shrink-0"
         onClick={() => {
-          focusParkedAsk(item.requestId);
+          focusParkedAsk(pane.id, item.requestId);
         }}
       >
         Answer below

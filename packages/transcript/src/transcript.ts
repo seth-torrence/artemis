@@ -636,6 +636,16 @@ export class TranscriptModel {
     return built;
   };
 
+  /**
+   * The row an item is drawn in: itself, or the group it folded into.
+   *
+   * What turns "the word is in this item" into "scroll here" — a tool call
+   * inside a burst has no row of its own, and the marker that stands for the
+   * burst is the only thing on screen to be taken to. See `search.ts`, the one
+   * caller, and `rebuildRows` for the map behind it.
+   */
+  rowIdFor = (id: string): string => this.groupOf.get(id) ?? id;
+
   get length(): number {
     return this.ids.length;
   }
