@@ -59,7 +59,7 @@
  * fragment by construction; the directory test carries it alone.
  */
 
-import type { FileEdit } from './diff';
+import type { FileEdit } from '@rx-artemis/transcript';
 import { previewablePath } from './preview';
 import { separatorFor, type Platform } from './paths';
 

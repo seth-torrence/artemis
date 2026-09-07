@@ -185,7 +185,8 @@ describe('AboutSection', () => {
   /*
    * The two outcomes that must never be confused, asserted from both sides.
    *
-   * `unsupported` on Linux means no request was made, so the pane must not
+   * `unsupported` on Linux — a .deb or an AppImage, since a pacman install
+   * updates itself — means no request was made, so the pane must not
    * borrow the unreachable wording; and `unreachable` means one was, so it must
    * not borrow the "not available on this platform" wording. Either slip
    * produces a user debugging the wrong thing.
@@ -196,7 +197,7 @@ describe('AboutSection', () => {
     await renderPane();
     await clickCheck();
 
-    expect(screen.getByText('Automatic updates are not available on Linux.')).toBeTruthy();
+    expect(screen.getByText('This install of Artemis cannot update itself.')).toBeTruthy();
     expect(screen.getByText(/No check was made/)).toBeTruthy();
     expect(screen.queryByText(/could not be reached/)).toBeNull();
     expect(screen.queryByText(/network is in the way/)).toBeNull();

@@ -28,10 +28,20 @@
  *     is precisely what an installer is for, so the swap is the installer's job
  *     rather than this module's.
  *
- * Linux is deliberately absent. Artemis ships pacman, deb and AppImage there,
- * and only the AppImage is a single file that could be swapped — so there is no
- * one mechanism to write, and a package manager's install is the package
- * manager's business. {@link installTarget} answers `null`, a check answers
+ *   - **Arch** — download the `.pacman` this release published, verify it,
+ *     park it, and on the restart click hand it to `pacman -U` through
+ *     `pkexec`. A package manager's install is still the package manager's
+ *     business; what changed is that Artemis can now *ask* it, rather than
+ *     leaving the user to do the download, the checksum and the command by
+ *     hand. Unlike the Windows hand-over this waits for the result, because
+ *     the one failure that matters here — no polkit authentication agent in
+ *     the session — is recoverable, and the answer to it is a command the
+ *     user can paste against a file that is already downloaded and verified.
+ *
+ * The rest of Linux is still absent, and for the original reason: a `.deb`
+ * install would work the same way but has never been exercised, and an
+ * AppImage is a file the user placed somewhere Artemis has no business
+ * replacing. {@link installTarget} answers `null` there, a check answers
  * `unsupported`, and no network request is made at all.
  *
  * ## Where the releases live, and how they are reached
@@ -62,9 +72,9 @@
  * "there is a version", "install it", "not this one".
  */
 
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { accessSync, constants as fsConstants, createReadStream, createWriteStream } from 'node:fs';
+import { accessSync, existsSync, constants as fsConstants, createReadStream, createWriteStream } from 'node:fs';
 // `rm` is what clears the pending-update directory, which holds a single
 // downloaded installer, and what `removeTree` reduces to off macOS. Removing a
 // tree that can hold an *app bundle* is the case that cannot use it directly,
@@ -91,6 +101,7 @@ import { ARTEMIS_RELEASES_URL, ARTEMIS_REPO } from '@rx-artemis/protocol';
 import type { UpdateProgress, UpdateState, UpdateStep } from '@rx-artemis/protocol';
 
 import { createLogger } from './log.js';
+import { APP_NAME } from './appNames.js';
 import { tagForChannel, type ReleaseSummary, type UpdateChannel } from './updateChannel.js';
 import { decideOffer, isNewerVersion, parseUpdateFeed, type UpdateFeed } from './updateFeed.js';
 
@@ -131,6 +142,14 @@ export function feedName(): string {
   if (process.platform === 'darwin') {
     return `latest-mac-${process.arch === 'arm64' ? 'arm64' : 'x64'}.yml`;
   }
+  /*
+   * Linux has its own feed because electron-builder's `latest-linux.yml`
+   * names the AppImage — the only Linux target it considers updatable — and
+   * the artifact Artemis installs there is the `.pacman`. So the release job
+   * writes this one itself (`scripts/linux-update-feed.ts`), in the same
+   * three fields the others carry.
+   */
+  if (process.platform === 'linux') return 'latest-linux-pacman.yml';
   return 'latest.yml';
 }
 
@@ -140,7 +159,9 @@ export function feedName(): string {
  * swap eats a zip; Windows runs a setup exe.
  */
 export function artifactExtension(): string {
-  return process.platform === 'darwin' ? '.zip' : '.exe';
+  if (process.platform === 'darwin') return '.zip';
+  if (process.platform === 'linux') return '.pacman';
+  return '.exe';
 }
 
 /**
@@ -157,6 +178,16 @@ export function artifactExtension(): string {
  * feed: no banner today.
  */
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases?per_page=20`;
+
+/**
+ * How long the pacman hand-over may take before it is called a failure.
+ *
+ * Long enough for someone to notice a dialog, find their password and type
+ * it; short enough that a session with no authentication agent — where
+ * `pkexec` waits rather than failing — ends in an explanation instead of a
+ * spinner that never stops.
+ */
+const PACMAN_INSTALL_TIMEOUT_MS = 3 * 60 * 1000;
 const RELEASES_FETCH_TIMEOUT_MS = 15_000;
 
 /** First check shortly after launch; then steadily. Both deliberately lazy —
@@ -586,13 +617,63 @@ async function sizeOf(file: string): Promise<number | null> {
  */
 type InstallTarget =
   | { readonly kind: 'mac-bundle'; readonly bundle: string }
-  | { readonly kind: 'windows-installer' };
+  | { readonly kind: 'windows-installer' }
+  | { readonly kind: 'pacman-package' };
+
+/** `pacman`, and the package database it would have to consult. */
+const PACMAN_BIN = '/usr/bin/pacman';
+const PKEXEC_BIN = '/usr/bin/pkexec';
+
+/**
+ * Does pacman own the copy of Artemis that is running — as *Artemis*?
+ *
+ * The question every other Linux answer follows from. `pacman -Qo` on the
+ * executable is the authority: it answers for the file rather than for the
+ * machine, so an AppImage on an Arch box says no and a `.pacman` install says
+ * yes wherever it was put.
+ *
+ * The package it names has to be ours, and that is not pedantry. On Arch
+ * nearly every binary belongs to some package — `/usr/bin/node` belongs to
+ * `nodejs` — so "pacman owns this file" is very nearly "this is Arch", and
+ * acting on it would have Artemis offer to `pacman -U` its own release over
+ * whatever else happened to be running it. Only a copy that pacman knows by
+ * the app's own name is a copy this release can replace.
+ *
+ * Asked once and remembered: it cannot change under a running process, and
+ * `supported()` is called from the menu. Synchronous because its callers are,
+ * and cheap enough to be — one `pacman -Qo`, once per launch, behind an
+ * `existsSync` that skips it entirely on every machine without pacman.
+ */
+let pacmanOwnership: boolean | null = null;
+export function ownedByPacman(): boolean {
+  if (pacmanOwnership !== null) return pacmanOwnership;
+  pacmanOwnership = false;
+  if (process.platform === 'linux' && existsSync(PACMAN_BIN)) {
+    try {
+      // `/opt/Artemis/artemis is owned by Artemis 2.5.0-1`
+      const owner = execFileSync(PACMAN_BIN, ['-Qo', process.execPath], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5_000,
+      });
+      pacmanOwnership = new RegExp(`\\bis owned by ${APP_NAME} `, 'i').test(owner);
+    } catch {
+      // Not owned, or pacman could not say: either way, not ours to replace.
+    }
+  }
+  return pacmanOwnership;
+}
+
+/** Only for the tests, which have to ask on more than one imagined machine. */
+export function forgetPacmanOwnership(): void {
+  pacmanOwnership = null;
+}
 
 export function createUpdater(options: UpdaterOptions): Updater {
   const { userDataDir, broadcast } = options;
   const settingsPath = join(userDataDir, 'update-settings.json');
   const pendingDir = join(userDataDir, PENDING_DIR_NAME);
-  /** The parked Windows installer behind a `ready` state, if any. */
+  /** The parked Windows installer or Arch package behind a `ready` state, if any. */
   let pendingInstaller: string | null = null;
 
   let current: UpdateState = IDLE;
@@ -677,6 +758,7 @@ export function createUpdater(options: UpdaterOptions): Updater {
    */
   function supported(): boolean {
     if (!app.isPackaged) return false;
+    if (process.platform === 'linux') return ownedByPacman();
     return process.platform === 'darwin' || process.platform === 'win32';
   }
 
@@ -859,6 +941,12 @@ export function createUpdater(options: UpdaterOptions): Updater {
       // Nothing to probe for writability: the installer elevates if it must.
       return { kind: 'windows-installer' };
     }
+    if (process.platform === 'linux') {
+      // Nothing to probe for writability: pacman runs as root and replaces
+      // whatever it owns. Whether it owns *this* copy is the whole question,
+      // and `ownedByPacman` is it.
+      return ownedByPacman() ? { kind: 'pacman-package' } : null;
+    }
     if (process.platform !== 'darwin') return null;
     // …/Artemis.app/Contents/MacOS/Artemis → …/Artemis.app
     const bundle = resolve(process.execPath, '..', '..', '..');
@@ -956,18 +1044,20 @@ export function createUpdater(options: UpdaterOptions): Updater {
         throw new Error('the downloaded artifact did not match the published checksum');
       }
 
-      if (target.kind === 'windows-installer') {
+      if (target.kind === 'windows-installer' || target.kind === 'pacman-package') {
         step('installing');
         /*
          * "Installing" here means parking, and the word is still honest: from
          * the user's side the install is done and waiting on a restart, which
          * is exactly what `ready` means on macOS too. What differs is who does
          * the replacing — a running `.exe` cannot be renamed over itself, so
-         * the setup program does it, and it cannot run until Artemis quits.
+         * the setup program does it, and it cannot run until Artemis quits;
+         * on Arch it is pacman, which needs root and therefore a moment when
+         * the user is present to grant it.
          *
-         * The exe has to outlive this staging directory, which the `finally`
+         * The file has to outlive this staging directory, which the `finally`
          * below removes: `ready` can stand for days before the restart click
-         * hands the file over. Copied rather than renamed because the temp
+         * hands it over. Copied rather than renamed because the temp
          * directory is very often another filesystem.
          */
         await rm(pendingDir, { recursive: true, force: true });
@@ -1027,16 +1117,59 @@ export function createUpdater(options: UpdaterOptions): Updater {
     }
   }
 
-  /** Remove whatever a previous update parked: bundles on macOS, installers on Windows. */
+  /**
+   * Hand the verified package to pacman, and relaunch into it.
+   *
+   * `pkexec` rather than a terminal: this is a click in a window, and the
+   * password belongs in the session's own authentication dialog. That dialog
+   * is drawn by a polkit *agent*, which is a separate thing from the polkit
+   * daemon and is not running in every session — a bare Wayland compositor
+   * very often has none — and with no agent `pkexec` waits rather than
+   * failing. Hence the timeout, and hence the message: by this point the
+   * download and the checksum are already done, so what is left for the user
+   * is one command against a file that is sitting there, and saying which
+   * command and which file is the whole difference between a dead end and an
+   * inconvenience.
+   *
+   * Waited on rather than handed over, unlike Windows: pacman replaces files
+   * this process is running from, which is safe — the running inodes survive
+   * being unlinked — and being here to hear the exit code is what makes the
+   * failure reportable at all.
+   */
+  async function handToPacman(parked: string): Promise<void> {
+    log.info('Installing the update through pacman.');
+    try {
+      await execFileAsync(PKEXEC_BIN, [PACMAN_BIN, '-U', '--noconfirm', parked], {
+        timeout: PACMAN_INSTALL_TIMEOUT_MS,
+      });
+    } catch (error) {
+      log.error('pacman could not install the update; the installed app is untouched.', error);
+      setState({
+        phase: 'error',
+        version: current.version,
+        message:
+          'Artemis could not ask for the permission pacman needs — the session may have no authentication agent running, or the request was declined. ' +
+          `The update is downloaded and verified; install it with:  sudo pacman -U ${parked}`,
+        releaseUrl: RELEASES_URL,
+        progress: null,
+      });
+      return;
+    }
+    log.info('pacman installed the update; relaunching.');
+    app.relaunch();
+    app.quit();
+  }
+
+  /** Remove whatever a previous update parked: bundles on macOS, installers on Windows, packages on Arch. */
   async function sweepLeftovers(): Promise<void> {
     const target = installTarget();
     if (target === null) return;
 
-    if (target.kind === 'windows-installer') {
+    if (target.kind === 'windows-installer' || target.kind === 'pacman-package') {
       // Reached on the launch *after* an install, whether the installer ran or
-      // the user never restarted — either way this exe describes a release that
-      // is now either installed or superseded, and the next check downloads
-      // whatever it actually needs. Nothing here is a rollback path.
+      // the user never restarted — either way this file describes a release
+      // that is now either installed or superseded, and the next check
+      // downloads whatever it actually needs. Nothing here is a rollback path.
       await rm(pendingDir, { recursive: true, force: true }).catch((error: unknown) => {
         log.warn('Could not clear the pending-update directory.', error);
       });
@@ -1150,6 +1283,15 @@ export function createUpdater(options: UpdaterOptions): Updater {
         // which is what makes this a restart rather than a quit.
         spawn(installer, ['/S', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
         app.quit();
+        return current;
+      }
+      if (process.platform === 'linux') {
+        const parked = pendingInstaller;
+        if (parked === null) {
+          log.warn('Ready to restart, but no package was parked; standing down.');
+          return setState(IDLE);
+        }
+        void handToPacman(parked);
         return current;
       }
       log.info('Restarting into the installed update at the user\'s request.');

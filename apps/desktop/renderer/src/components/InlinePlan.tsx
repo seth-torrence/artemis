@@ -54,7 +54,7 @@ import type { PlanProposal } from '@rx-artemis/protocol';
 
 import { respondToPermission } from '../state/store';
 import { usePaneRef } from '../state/paneContext';
-import type { PermissionItem } from '../state/transcript';
+import type { PermissionItem } from '@rx-artemis/transcript';
 import { Markdown } from './Markdown';
 import { ToneBadge } from './primitives';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';

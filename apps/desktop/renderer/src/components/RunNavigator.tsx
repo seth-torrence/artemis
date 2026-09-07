@@ -56,7 +56,7 @@ import type {
 } from '@rx-artemis/protocol';
 
 import { usePermissionModes } from '../hooks/useCapability';
-import { formatTokens } from '../lib/format';
+import { formatTokens } from '@rx-artemis/transcript';
 import { shortenPath } from '../lib/paths';
 import {
   ULTRACODE_LEVEL,

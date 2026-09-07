@@ -4,9 +4,11 @@
   "files": [],
   "references": [
     { "path": "./packages/protocol" },
+    { "path": "./packages/transcript" },
     { "path": "./packages/core" },
     { "path": "./packages/sdk" },
     { "path": "./apps/server" },
+    { "path": "./apps/tui" },
     { "path": "./apps/desktop/main" },
     { "path": "./apps/desktop/preload" },
     { "path": "./apps/desktop/renderer" },

@@ -40,7 +40,7 @@ import { useEffect, useState, type ReactElement } from 'react';
 import { AlertTriangleIcon, Trash2Icon } from 'lucide-react';
 import type { SessionSummary } from '@rx-artemis/protocol';
 
-import { condenseTitle } from '../lib/format';
+import { condenseTitle } from '@rx-artemis/transcript';
 import { deleteSession, isSessionRunning } from '../state/store';
 import {
   AlertDialog,

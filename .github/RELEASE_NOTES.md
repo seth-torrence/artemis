@@ -1,6 +1,172 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.7.3
+
+Two repairs to conversations held with an Artemis server.
+
+**A served turn answers once.** Every turn that used a tool drew its whole
+answer twice — once as it streamed, then again underneath, whole. The second
+copy was the closing block arriving after the activity rows had already
+settled the first, with nothing on it to say which block it finished. It says
+so now, and the answer lands once. A turn that used no tools was never
+affected, which is what made it look intermittent.
+
+**A served turn shows its thinking.** Reasoning never crossed the wire at all:
+the server had nowhere to put it that was not the answer itself, so it dropped
+it. It now travels beside the answer, in the field the reasoning-capable
+OpenAI-shaped servers already use, and the thinking rows appear where the
+model wrote them. A subagent's own words stay out of the answer too — they
+were being read back into it, so a delegated agent's findings arrived inline
+and then again in the agent's account of them.
+
+**A dropped connection no longer ends the turn.** A laptop that slept, a
+tunnel that went down or a server that restarted mid-turn left the pane
+holding "Could not reach the Artemis server" while the run carried on
+elsewhere, unwatched and unreadable. The run was always kept; there was simply
+no way back to it. Now the pane says the link went, reconnects on its own, and
+picks the answer up from the last thing it drew. Quiet stretches carry a
+heartbeat, so a stream that has genuinely died is noticed in seconds rather
+than at the end of a turn that never comes.
+
+## What's new in 2.7.2
+
+**A turn that produced nothing now says so.** A run can end having said
+nothing, run nothing and thought nothing — the provider queued the message
+rather than answering it — and all either app showed for that was a dim
+`52ms · 0 tok`. That reads as the agent shrugging, and there was no way to
+tell it apart from a turn whose accounting happens to be small. The terminal
+now leads that row with "no reply"; the desktop names it rather than calling
+it "completed" and, more to the point, stops hiding it, since a clean run's
+block is suppressed under two of the three run-summary settings and a message
+answered by silence was left with no row under it at all.
+
+**Thinking is shown whole.** Long reasoning was flattened into one line and
+then cut off at 200 characters. The desktop gets away with a preview because
+its block folds open on demand; a terminal row has no fold, so the end of a
+thought was simply unreadable. It now renders in full, in the paragraphs it
+was written in.
+
+## What's new in 2.7.1
+
+Two repairs to how the terminal app reads.
+
+**The plan meters have colour.** They went red at 90% and amber at 75%
+already, but below that the bar was dim grey — a gauge that looks switched
+off rather than one with room in it. The filled cells and the number now take
+green, amber and red on the same thresholds the desktop's rings use, while
+the empty cells stay dim so the bar reads as a level rather than a coloured
+block.
+
+**The agent's mark no longer runs into its text.** `⏺` has an emoji
+presentation in many terminal fonts — a rounded square with a hollow circle —
+and is drawn two cells wide where the gutter allows one, leaving no gap
+before the message. It is a plain `●` now, one cell wide everywhere.
+
+## What's new in 2.7.0
+
+The terminal app lets you leave a turn running, and is easier to read while
+it does.
+
+**Switch conversations while one is working.** Switching used to be refused
+until a turn finished, which made the one thing worth doing during a long
+turn — going and reading something else — the one thing you could not do. Now
+the turn keeps running: its transcript goes on filling in the background and
+switching back is instant, with nothing re-read. Starting a new conversation,
+moving to another folder, and switching account all work the same way, and
+`/resume` no longer waits either.
+
+**The rail says what each conversation is doing.** `●` marks the one you are
+in, `◐` one still working, and a yellow `⚿` one that has stopped to ask
+permission — the last being the only warning that a turn has gone quiet
+waiting for an answer.
+
+**Four voices, four faces in the transcript.** The agent speaking and the
+agent running a command were both `⏺`, so at a glance they were the same row;
+tools now take `◆` and speech keeps `⏺`. Your own messages were `>` with the
+text dimmed — the faintest thing on a screen you scan to find them — and are
+now `▌` in the accent colour, in bold.
+
+**Plan windows have bars.** `5hr █░░░ 16% · Week █░░░ 8%`. The number stays,
+because a short bar cannot be precise and three numbers cannot be taken in at
+a glance. The bar lights its first cell for any use at all and holds its last
+back until the window really is full, so neither end of it lies, and it is
+dropped on a narrow terminal rather than crowding the line beside it.
+
+**Fixes.** A directory beside your home folder was renamed on screen —
+`/home/adamant` drew as `~mant`. `/plan` was swallowed by the terminal
+instead of reaching Claude Code. `/attach ~/file` looked for a folder
+literally called `~`. And `--model` inherited the previous model's fast mode
+and effort instead of starting the named one plain.
+
+## What's new in 2.6.0
+
+The terminal app remembers what you chose, offers your own skills, and lets
+you choose where to work from a list.
+
+**It opens as you left it.** The account, model and permission mode you last
+chose are what the next launch starts in, so setting them is work you do once
+rather than at every launch. `--profile`, `--model` and `--mode` still win: a
+flag is what you say when you mean this launch, not from now on. The model is
+remembered per account, because a model belongs to the provider that named
+it.
+
+**Your skills are in the `/` menu.** They always reached the model, but the
+menu did not know them until after your first message — the list arrived only
+with a run. It is now read up front through the same channel a run uses,
+remembered per account and directory, and drawn with the first frame. A
+bridged skill is found by the name you would think of, so `/code-review`
+finds `artemis-skills:code-review` without your knowing which marketplace
+owns it.
+
+**Choose where to work from a list, not a path.** `/cwd`, and a new
+"+ in another folder…" row at the top of the rail, offer the folders you have
+already worked in — newest first, with the one you are in marked "here" — and
+a browser for one that is not there yet. The browser walks the filesystem a
+directory at a time; the first row chooses where you have arrived, so
+accepting a folder is Enter. Long lists scroll instead of running off the
+screen.
+
+**Archive and delete from the rail.** `a` archives the selected conversation
+and `d` deletes it. Archiving writes the same tag the desktop reads, so a
+conversation put away in either is put away in both, and it moves to an
+archive folder at the foot of the rail. Deleting destroys the transcript, so
+it asks first.
+
+**A folder with nothing in it is no longer drawn.** Including the one you are
+standing in — a heading over no rows promised contents it did not have.
+
+## What's new in 2.5.0
+
+Artemis runs in the terminal.
+
+**A terminal UI, installed with one command.** `artemis-tui` is the same
+engine, the same signed-in accounts and the same permission controls as the
+desktop app, with no window: a full-screen terminal app in the shape of the
+provider CLIs. A rail on the left lists every conversation across all your
+accounts, grouped by project with worktrees folded into their repository;
+`/profile`, `/model` and `/mode` switch account, model and permission mode;
+`/resume`, `/attach`, `/tasks` and `/usage` cover the rest, and `--print`
+runs one turn for scripts. The line under the composer says what the next
+message goes out as, with the 5-hour, weekly and Fable windows at its right.
+Every release now ships a self-contained build for macOS on Apple silicon and
+Linux on x64, and this installs it:
+
+    curl -fsSL https://raw.githubusercontent.com/seth-torrence/artemis/main/install.sh | bash
+
+It keeps a Node runtime beside the build when the machine has none new
+enough, and never touches the system's. `artemis-tui --update` moves to the
+latest release, and an installed copy checks once a day whether there is one.
+Accounts come from the desktop app: sign in there, and the terminal has them
+the same minute.
+
+**Codex accounts get the 5-hour and weekly rings.** Codex describes its rate
+limits by duration rather than by name, so the status bar's meter matched
+neither and fell back to a single ring under a label like "5 hours". A window
+five hours long is the 5-hour limit and one a week long is the weekly; they
+now read as `5hr` and `Week` beside a Claude account's, in the desktop and in
+the terminal alike.
+
 ## What's new in 2.4.8
 
 Permission modes, and two ways they quietly did not take effect.

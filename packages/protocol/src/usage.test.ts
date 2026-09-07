@@ -19,6 +19,7 @@ import {
   recommendProfile,
   type PlanUsage,
   type PlanUsageWindow,
+  planMeterSlots,
 } from './usage.js';
 
 const NOW = 1_700_000_000_000;
@@ -745,5 +746,54 @@ describe('applyPlanLimit', () => {
     const merged = applyPlanLimit(metered, { status: 'rejected', windowId: 'five_hour' }, NOW + 1);
     expect(merged?.available).toBe(true);
     expect(merged?.windows).toHaveLength(1);
+  });
+});
+
+describe('planMeterSlots', () => {
+  const at = (id: string, utilization: number | null, label = id): PlanUsageWindow => ({
+    id,
+    label,
+    utilization,
+    resetsAt: null,
+  });
+  const plan = (windows: readonly PlanUsageWindow[]): PlanUsage => ({ available: true, windows, fetchedAt: 0 });
+
+  it('draws the 5-hour, the week and Fable, in that order, whatever order the plan lists them', () => {
+    const slots = planMeterSlots(
+      plan([at('model_scoped:Fable', 8), at('seven_day', 12), at('model_scoped:Opus', 40), at('five_hour', 61)]),
+    );
+
+    expect(slots.map((slot) => [slot.label, slot.window.utilization])).toEqual([
+      ['5hr', 61],
+      ['Week', 12],
+      ['Fable', 8],
+    ]);
+  });
+
+  it('skips a window the plan does not report rather than drawing it empty', () => {
+    // A Codex plan meters a 5-hour and a weekly window and nothing per model.
+    const slots = planMeterSlots(plan([at('five_hour', 10), at('seven_day', 40)]));
+
+    expect(slots.map((slot) => slot.label)).toEqual(['5hr', 'Week']);
+  });
+
+  it('gives Fable a slot by name only, case-insensitively', () => {
+    expect(planMeterSlots(plan([at('five_hour', 1), at('model_scoped:fable', 2)])).map((s) => s.label)).toEqual([
+      '5hr',
+      'Fable',
+    ]);
+    // Another model's bucket does not stand in for Fable's.
+    expect(planMeterSlots(plan([at('five_hour', 1), at('model_scoped:Opus', 90)])).map((s) => s.label)).toEqual(['5hr']);
+  });
+
+  it('falls back to the window closest to full, under its own name, on a plan with none of the three', () => {
+    const slots = planMeterSlots(plan([at('primary', 12, '30 days'), at('secondary', 3, '24 hours')]));
+
+    expect(slots).toEqual([{ id: 'primary', label: '30 days', window: at('primary', 12, '30 days') }]);
+  });
+
+  it('draws nothing when the plan is unknown or does not apply', () => {
+    expect(planMeterSlots(null)).toEqual([]);
+    expect(planMeterSlots({ available: false, unavailableReason: 'API key billing', windows: [], fetchedAt: 0 })).toEqual([]);
   });
 });

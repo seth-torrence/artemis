@@ -38,16 +38,15 @@ import { useCallback, useEffect, useState, type ReactElement } from 'react';
 import { GaugeIcon, RefreshCwIcon } from 'lucide-react';
 
 import {
-  bindingWindow,
-  focusedWindow,
   isModelScoped,
+  planMeterSlots,
   type PlanLimitStatus,
   type PlanUsage,
   type PlanUsageWindow,
 } from '@rx-artemis/protocol';
 
 import { call, resolveBridge } from '../lib/bridge';
-import { formatTokens } from '../lib/format';
+import { formatTokens } from '@rx-artemis/transcript';
 import { useServedAccount } from '../hooks/useServedAccount';
 import { activeCapabilities, activeProviderLabel, useApp } from '../state/store';
 import { usePane, usePaneRef } from '../state/paneContext';
@@ -255,69 +254,23 @@ const PLACEHOLDER_SLOTS: readonly MeterSlot[] = [
   { key: 'model_scoped', label: 'Fable', window: null },
 ];
 
-const MODEL_SCOPED_PREFIX = 'model_scoped:';
-
-/**
- * Fable's own weekly bucket, when the plan meters one.
- *
- * By name, and *only* by name. Fable earns a permanent ring because it is the
- * expensive model, it is metered separately from the plan total, and on an
- * account that leans on it it is the limit that goes first. None of that is
- * true of the per-model family in general, so a plan that meters something else
- * gets two rings rather than a third one standing in — a ring is a thing you
- * learn the position of, and one whose subject changes with the account is a
- * number you have to read the label to trust.
- *
- * Case-insensitive because the name is the provider's `display_name` verbatim
- * — presentation, not an identifier, and not ours to depend on the casing of.
- */
-function fableWindow(usage: PlanUsage | null): PlanUsageWindow | null {
-  if (!usage?.available) return null;
-  return (
-    usage.windows.find(
-      (w) =>
-        isModelScoped(w.id) && w.id.slice(MODEL_SCOPED_PREFIX.length).toLowerCase() === 'fable',
-    ) ?? null
-  );
-}
-
 /**
  * The rings to draw, in order.
  *
- * A window the plan does not report is *skipped* rather than drawn empty: an
- * unfilled ring is indistinguishable from a ring at 0%, and "this plan has no
- * weekly limit" must not read as "you have used none of it". That is the same
- * rule the unsupported-provider branch follows with its gauge glyph. So this is
- * up to three rings, not always three — an account with no Fable bucket shows
- * two, and the bar is shorter.
- *
- * Which leaves the case where none of the three exist — a Codex account meters
- * `primary` and `secondary`, and matches nothing here. Falling back to the
- * window closest to full, under the provider's own name for it, is what this
- * meter did before any of this and it keeps a provider with its own vocabulary
- * showing a real number instead of three dashes.
+ * Which windows earn a ring — the 5-hour, the week, Fable's own bucket, or the
+ * binding window on a plan with none of those — is {@link planMeterSlots}, in
+ * protocol, so the terminal UI's readout and this bar cannot disagree. What is
+ * decided here is only the empty case: three dashed rings rather than nothing,
+ * because the trigger is a control the user clicks, and one that appears a
+ * second after launch — shoving the rest of the row sideways as it does — is
+ * worse than one that starts empty and fills in.
  */
 // Exported for the run navigator's footer, which draws the same three rings —
 // same slots, same skip rules — so the two surfaces cannot disagree about
 // which windows are worth a ring.
 export function meterSlots(usage: PlanUsage | null): readonly MeterSlot[] {
-  const slots: MeterSlot[] = [];
-
-  const fiveHour = focusedWindow(usage, 'five_hour');
-  if (fiveHour !== null) slots.push({ key: fiveHour.id, label: '5hr', window: fiveHour });
-
-  const week = focusedWindow(usage, 'seven_day');
-  if (week !== null) slots.push({ key: week.id, label: 'Week', window: week });
-
-  const fable = fableWindow(usage);
-  if (fable !== null) slots.push({ key: fable.id, label: 'Fable', window: fable });
-
-  if (slots.length > 0) return slots;
-
-  const binding = bindingWindow(usage);
-  if (binding !== null) return [{ key: binding.id, label: binding.label, window: binding }];
-
-  return PLACEHOLDER_SLOTS;
+  const slots = planMeterSlots(usage).map((slot) => ({ key: slot.id, label: slot.label, window: slot.window }));
+  return slots.length > 0 ? slots : PLACEHOLDER_SLOTS;
 }
 
 /** One ring's contribution to the trigger's label: "5hr 61%". */

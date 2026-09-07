@@ -1,0 +1,36 @@
+{
+  "name": "@rx-artemis/tui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Artemis in the terminal: the same profiles, models and permission controls as the desktop app, drawn with Ink and driven in-process.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/main.js",
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "artemis": "./dist/main.js",
+    "artemis-tui": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@rx-artemis/core": "workspace:*",
+    "@rx-artemis/protocol": "workspace:*",
+    "@rx-artemis/transcript": "workspace:*",
+    "ink": "^7.1.1",
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "ink-testing-library": "^4.0.0",
+    "typescript": "~7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

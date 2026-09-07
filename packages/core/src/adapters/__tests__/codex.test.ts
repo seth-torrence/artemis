@@ -537,10 +537,21 @@ describe('parseRateLimitWindows', () => {
     expect(parseRateLimitWindows({ primary: { windowDurationMins: 60 } })[0]?.utilization).toBeNull();
   });
 
-  it('reads both windows when the plan has two', () => {
+  it('reads both windows when the plan has two, under the ids every plan shares', () => {
     const windows = parseRateLimitWindows({
       primary: { usedPercent: 10, windowDurationMins: 300 },
       secondary: { usedPercent: 40, windowDurationMins: 10080 },
+    });
+
+    // A five-hour window is the 5-hour limit and a week-long one the weekly,
+    // so a readout draws them beside Claude's under the same names.
+    expect(windows.map((w) => w.id)).toEqual(['five_hour', 'seven_day']);
+  });
+
+  it('keeps its own ids for a duration no other plan meters', () => {
+    const windows = parseRateLimitWindows({
+      primary: { usedPercent: 10, windowDurationMins: 1440 },
+      secondary: { usedPercent: 40, windowDurationMins: 43200 },
     });
 
     expect(windows.map((w) => w.id)).toEqual(['primary', 'secondary']);

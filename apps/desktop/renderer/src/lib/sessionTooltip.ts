@@ -16,7 +16,7 @@
 
 import type { SessionSummary } from '@rx-artemis/protocol';
 
-import { formatRelative, oneLine } from './format';
+import { formatRelative, oneLine } from '@rx-artemis/transcript';
 
 /**
  * One label/value line of the session tooltip.

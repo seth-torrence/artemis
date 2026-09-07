@@ -368,22 +368,23 @@ function CheckResult({
        * to fail — and dressing it as an error is what would send a Linux user
        * to check their firewall.
        *
-       * Two readings, because main's one outcome covers two facts: on Linux it
-       * is the platform, and on macOS or Windows — both of which do update
-       * themselves when installed — it can only be a development build.
+       * Two readings, because main's one outcome covers two facts: on Linux
+       * it is the install — an Arch package updates itself, a `.deb` or an
+       * AppImage does not — and on macOS or Windows, both of which do update
+       * themselves when installed, it can only be a development build.
        */
       return (
         <Answer
           tone="neutral"
           title={
             platform === 'linux'
-              ? `Automatic updates are not available on ${platformLabel(platform)}.`
+              ? 'This install of Artemis cannot update itself.'
               : 'This build cannot update itself.'
           }
         >
           <p className="text-2xs leading-relaxed text-ink-muted">
             {platform === 'linux'
-              ? 'No check was made — there is nothing here for one to act on. Download the version you want from the releases page and install it the way you installed this one.'
+              ? 'No check was made — there is nothing here for one to act on. Artemis updates itself where pacman installed it; a .deb or an AppImage is yours to replace. Download the version you want from the releases page and install it the way you installed this one.'
               : 'Updates replace an installed copy of Artemis. This one is running from a development build, where the installed app is the repository checkout.'}
           </p>
         </Answer>

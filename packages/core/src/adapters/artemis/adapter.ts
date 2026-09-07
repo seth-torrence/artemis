@@ -37,6 +37,19 @@
  *    is passed back to continue it — the one capability the raw local
  *    endpoints cannot offer.
  *
+ * ## A stream that dies is picked back up
+ *
+ * One request per turn, but not one *socket* per turn. A laptop sleeps, a
+ * tunnel drops, the server restarts under a deploy — and the run, kept alive
+ * by `artemis.remote.detach`, goes on without anyone watching. Until this
+ * adapter could reattach, that was an error card and a conversation the user
+ * could only read back as history. Now every chunk carries the server's
+ * cursor (`artemis.seq`), the server sends a heartbeat comment through the
+ * quiet stretches, and when the stream ends without its sentinel — or goes
+ * silent past the watchdog on a server that has proven it heartbeats — the
+ * run reconnects with backoff to `GET /api/v0/runs/{id}/stream?after=N` and
+ * carries on from the last chunk it rendered. See {@link ArtemisRun}.
+ *
  * ## The profile is an endpoint, and the key is a connection token
  *
  * Same entry model as the local providers: `baseUrl` for the address, and the
@@ -100,7 +113,7 @@ import type {
 import { splitEvents } from '../local/stream.js';
 import { parseServerModels } from './catalogue.js';
 import { guardRemoteDecision } from './permissions.js';
-import { readServerLine } from './stream.js';
+import { readServerLine, type ServerStreamDelta } from './stream.js';
 
 export const ARTEMIS_PROVIDER_ID: ProviderId = 'artemis';
 
@@ -270,6 +283,39 @@ function asEndReason(value: string | undefined): RunEndReason | undefined {
     : undefined;
 }
 
+/** Tuning for the reconnect loop. Tests shorten these; the registry takes the defaults. */
+export interface ArtemisReconnectOptions {
+  /**
+   * How long a stream may be silent before it is presumed dead, once the
+   * server has shown that it sends heartbeats. Three of the server's
+   * fifteen-second beats by default: one lost beat is a hiccup, three is a
+   * link that has gone.
+   */
+  readonly watchdogMs?: number;
+  /** Waits between reconnect attempts, the last one repeated for as long as it takes. */
+  readonly backoffMs?: readonly number[];
+}
+
+const DEFAULT_WATCHDOG_MS = 45_000;
+const DEFAULT_BACKOFF_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
+/** How long a reconnect waits for the server's headers before trying again. */
+const RECONNECT_HANDSHAKE_MS = 15_000;
+
+/** The one stream's worth of state that has to outlive a socket. */
+interface StreamState {
+  /** Everything the turn says lands on this one message; blocks number within it. */
+  readonly messageId: MessageId;
+  activity: readonly ArtemisActivity[];
+  endReason: string | undefined;
+  remoteError: string | undefined;
+  /** Relay a reasoning fragment into the block in progress, or open one. */
+  thinking(text: string): void;
+  /** Relay an answer fragment the same way. */
+  text(text: string): void;
+  /** Close the block in progress, finalising an answer block with its `text.complete`. */
+  close(): void;
+}
+
 /**
  * One turn against a remote Artemis.
  *
@@ -289,6 +335,26 @@ function asEndReason(value: string | undefined): RunEndReason | undefined {
  * target — a session the server has never heard of, poisoning every following
  * turn. A late `session.started` renders fine; a fabricated session id does
  * not.
+ *
+ * ## One message, several blocks, and every block names its index
+ *
+ * The wire is one flat stream of fragments — answer text on `content`,
+ * reasoning on `reasoning_content` — with no block structure of its own. This
+ * run rebuilds one: each stretch of reasoning and each stretch of answer is a
+ * block of the single message the turn produces, numbered in the order they
+ * arrived, so a transcript draws them in that order — the thinking that came
+ * *after* the first sentence lands after it rather than being glued onto the
+ * fold above.
+ *
+ * Every `text.complete` carries the `blockIndex` its deltas carried, and that
+ * is a fix rather than tidiness. The transcript keys blocks by (message,
+ * index) and settles every streaming block the moment a tool row lands. The
+ * closing completion used to be sent *after* the activity report and without
+ * an index, so by the time it arrived the block its deltas had built was
+ * already settled, the index-less lookup could not find it, a fresh block was
+ * opened, and the reader saw the whole answer twice — once streamed, once
+ * whole. Now the completion names its block and lands before the report, so
+ * it finalises the block it belongs to, which is what a completion is for.
  */
 class ArtemisRun implements Run {
   readonly runId: RunId;
@@ -309,12 +375,29 @@ class ArtemisRun implements Run {
   /** Open permission prompts, to move {@link status} in and out of `awaiting_permission`. */
   #openPermissions = 0;
   readonly #queue = new AsyncQueue<AgentEvent>();
+  /** The run's own stop: `interrupt` and `dispose`. Never a reconnect's. */
   readonly #abort = new AbortController();
   readonly #input: ResolvedRunInput;
+  readonly #reconnect: Required<ArtemisReconnectOptions>;
+  /**
+   * The last cursor rendered, handed back as `after` when the stream is picked
+   * up again. `-1` until the first numbered chunk: a stream that dies before
+   * one is resumed from the beginning, which is right, because nothing of it
+   * has been drawn.
+   */
+  #lastSeq = -1;
+  /**
+   * Whether this server has sent a heartbeat comment yet. The watchdog arms
+   * only once it has: an older server sends none, and its silence during a
+   * long tool call is not evidence of anything.
+   */
+  #heartbeats = false;
+  #notices = 0;
 
-  constructor(input: ResolvedRunInput) {
+  constructor(input: ResolvedRunInput, reconnect: Required<ArtemisReconnectOptions>) {
     this.runId = input.runId;
     this.#input = input;
+    this.#reconnect = reconnect;
     void this.#drive();
   }
 
@@ -421,10 +504,12 @@ class ArtemisRun implements Run {
           ? {}
           : { permissionMode: this.#input.permissionMode }),
       };
+      const stream = this.#streamState();
+      let attempt = new AbortController();
       const response = await fetch(`${root}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authHeaders(this.#input.env) },
-        signal: this.#abort.signal,
+        signal: AbortSignal.any([this.#abort.signal, attempt.signal]),
         body: JSON.stringify({
           model: this.#input.model,
           messages: [{ role: 'user', content: this.#input.prompt }],
@@ -438,60 +523,41 @@ class ArtemisRun implements Run {
         throw await refusalError(response, root);
       }
 
-      const messageId = `${this.runId}-0` as MessageId;
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let text = '';
-      let activity: readonly ArtemisActivity[] = [];
-      let endReason: string | undefined;
+      let outcome = await this.#consume(response.body, stream, attempt);
+
       /*
-       * The server's own account of why the run failed.
+       * The stream died and the run did not.
        *
-       * Servers from 2.4.6 back send nothing here, which is what the fallback
-       * message below is for — and what it used to be the *only* case of. The
-       * old sentence claimed the detail was in the reply text; it never was,
-       * because a run that fails before generating has no text, which is the
-       * shape of every failure worth explaining (a signed-out account, a
-       * refused model, a workspace that is not there).
+       * `detach` kept the run alive on the server the moment the socket went;
+       * what happens next is this loop, and it is the whole difference between
+       * a laptop that slept through a turn waking to an error card and one
+       * that wakes to the rest of the answer. Each pass says the link is gone,
+       * reconnects with backoff from the last cursor rendered, and consumes
+       * the resumed stream exactly as it consumed the first. It ends the way
+       * the first stream would have: on the sentinel, on a refusal the server
+       * wrote into the stream, or on the user's own stop.
        */
-      let remoteError: string | undefined;
-
-      stream: for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-        buffer += decoder.decode(chunk, { stream: true });
-        const { lines, rest } = splitEvents(buffer);
-        buffer = rest;
-
-        for (const line of lines) {
-          const delta = readServerLine(line);
-          if (delta === null) continue;
-          if (delta === 'done') break stream;
-
-          if (delta.error !== undefined) throw adapterError('provider_unavailable', delta.error);
-          if (delta.artemis?.sessionId !== undefined) this.#noteSession(delta.artemis.sessionId);
-          // Learned like the session id: the server announces it once and early,
-          // and every native run route addresses it from here on.
-          if (delta.artemis?.runId !== undefined) this.#remoteRunId = delta.artemis.runId as RunId;
-          if (delta.artemis?.permission !== undefined) this.#notePermission(delta.artemis.permission);
-          // The final chunk's report replaces, not appends — it is the whole
-          // list, arriving once.
-          if (delta.artemis?.activity !== undefined) activity = delta.artemis.activity;
-          if (delta.artemis?.endReason !== undefined) endReason = delta.artemis.endReason;
-          if (delta.artemis?.error !== undefined) remoteError = delta.artemis.error;
-          if (delta.usage !== undefined) this.#usage = toUsage(delta.usage);
-          if (delta.thinking !== undefined) {
-            this.#emit({
-              type: 'thinking.delta',
-              messageId,
-              blockIndex: 0,
-              text: delta.thinking,
-            } as never);
-          }
-          if (delta.text !== undefined) {
-            text += delta.text;
-            this.#emit({ type: 'text.delta', messageId, blockIndex: 0, text: delta.text } as never);
-          }
+      while (outcome === 'broken') {
+        if (this.#abort.signal.aborted) throw adapterError('cancelled', 'The run was stopped.');
+        if (this.#remoteRunId === undefined) {
+          throw adapterError(
+            'provider_unavailable',
+            'Could not reach the Artemis server: the stream ended before the server announced the run, so there was nothing to pick back up.',
+          );
         }
+        stream.close();
+        this.#notice(
+          'The connection to the Artemis server dropped. The run is still going there; this pane will pick it up again when the link is back.',
+        );
+        const resumed = await this.#resume(root);
+        attempt = resumed.attempt;
+        this.#notice('Reconnected to the Artemis server. Catching up.');
+        outcome = await this.#consume(resumed.body, stream, attempt);
       }
+
+      // The answer is whole before the report of how it was reached: the last
+      // block closes here, with the `text.complete` that finalises it.
+      stream.close();
 
       /*
        * The activity report, rendered as settled tool rows. It arrives whole
@@ -499,7 +565,7 @@ class ArtemisRun implements Run {
        * what the remote agent did, not a live feed of it doing so. Each entry
        * is already summarised to a target, never contents.
        */
-      activity.forEach((entry, index) => {
+      stream.activity.forEach((entry, index) => {
         const toolCallId = `${this.runId}-act-${index}` as ToolCallId;
         this.#emit({
           type: 'tool.start',
@@ -517,11 +583,7 @@ class ArtemisRun implements Run {
         } as never);
       });
 
-      if (text !== '') {
-        this.#emit({ type: 'text.complete', messageId, role: 'assistant', text } as never);
-      }
-
-      const reason = asEndReason(endReason) ?? 'completed';
+      const reason = asEndReason(stream.endReason) ?? 'completed';
       this.#status = 'ended';
       this.#emit({
         type: 'run.end',
@@ -531,7 +593,7 @@ class ArtemisRun implements Run {
               error: {
                 code: 'unknown',
                 message:
-                  remoteError ??
+                  stream.remoteError ??
                   'The remote run failed, and this server did not say why. Servers before 2.4.7 send no reason; its own logs will have one.',
               } satisfies AgentError,
             }
@@ -551,6 +613,241 @@ class ArtemisRun implements Run {
     } finally {
       this.#queue.close();
     }
+  }
+
+  /**
+   * The block bookkeeping for one turn. See the class comment: a change of
+   * kind — reasoning to answer, answer to reasoning — closes the block and
+   * opens the next, and a closing answer block is finalised with a
+   * `text.complete` that names it. Held outside the socket loop because a
+   * reconnect continues the same message, not a new one.
+   */
+  #streamState(): StreamState {
+    const messageId = `${this.runId}-0` as MessageId;
+    let blockIndex = 0;
+    let blockKind: 'text' | 'thinking' | undefined;
+    let blockText = '';
+    const close = (): void => {
+      if (blockKind === 'text' && blockText !== '') {
+        this.#emit({
+          type: 'text.complete',
+          messageId,
+          role: 'assistant',
+          blockIndex,
+          text: blockText,
+        } as never);
+      }
+      if (blockKind !== undefined) blockIndex += 1;
+      blockKind = undefined;
+      blockText = '';
+    };
+    const open = (kind: 'text' | 'thinking'): void => {
+      if (blockKind === kind) return;
+      close();
+      blockKind = kind;
+    };
+    return {
+      messageId,
+      activity: [],
+      endReason: undefined,
+      remoteError: undefined,
+      thinking: (text) => {
+        open('thinking');
+        this.#emit({ type: 'thinking.delta', messageId, blockIndex, text } as never);
+      },
+      text: (text) => {
+        open('text');
+        blockText += text;
+        this.#emit({ type: 'text.delta', messageId, blockIndex, text } as never);
+      },
+      close,
+    };
+  }
+
+  /**
+   * Read one stream to its end.
+   *
+   * `done` is the sentinel: the turn is over. `broken` is everything else the
+   * link can do — the body ending without it, a socket reset, the watchdog's
+   * abort — and it means the run is still going somewhere that can no longer
+   * be heard. The two things that are *not* a break are thrown: a refusal
+   * the server wrote into the stream, which is final, and the user's own
+   * stop, which the caller reports as an interruption.
+   */
+  async #consume(
+    body: ReadableStream<Uint8Array>,
+    stream: StreamState,
+    attempt: AbortController,
+  ): Promise<'done' | 'broken'> {
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const watchdog = this.#watchdog(attempt);
+    try {
+      for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+        const text = decoder.decode(chunk, { stream: true });
+        // A comment line is the server's heartbeat. Seeing one is what arms
+        // the watchdog for the rest of this run; any byte at all resets it.
+        if (!this.#heartbeats && /(^|\n):/.test(text)) this.#heartbeats = true;
+        watchdog.touch();
+        buffer += text;
+        const { lines, rest } = splitEvents(buffer);
+        buffer = rest;
+
+        for (const line of lines) {
+          const delta = readServerLine(line);
+          if (delta === null) continue;
+          if (delta === 'done') return 'done';
+          if (delta.error !== undefined) throw adapterError('provider_unavailable', delta.error);
+          this.#apply(delta, stream);
+        }
+      }
+      // The body ended without the sentinel: the server went away mid-turn.
+      return 'broken';
+    } catch (error) {
+      if (error instanceof AdapterError || this.#abort.signal.aborted) throw error;
+      return 'broken';
+    } finally {
+      watchdog.stop();
+    }
+  }
+
+  /** Fold one chunk's delta into the run. */
+  #apply(delta: ServerStreamDelta, stream: StreamState): void {
+    const extensions = delta.artemis;
+    if (extensions?.sessionId !== undefined) this.#noteSession(extensions.sessionId);
+    // Learned like the session id: the server announces it once and early,
+    // and every native run route addresses it from here on.
+    if (extensions?.runId !== undefined) this.#remoteRunId = extensions.runId as RunId;
+    if (extensions?.permission !== undefined) this.#notePermission(extensions.permission);
+    // The final chunk's report replaces, not appends — it is the whole list,
+    // arriving once.
+    if (extensions?.activity !== undefined) stream.activity = extensions.activity;
+    if (extensions?.endReason !== undefined) stream.endReason = extensions.endReason;
+    if (extensions?.error !== undefined) stream.remoteError = extensions.error;
+    if (extensions?.gap !== undefined) {
+      stream.close();
+      this.#notice(
+        'Some of what the run did while this pane was disconnected is no longer on the server and could not be replayed.',
+      );
+    }
+    if (delta.usage !== undefined) this.#usage = toUsage(delta.usage);
+    if (delta.thinking !== undefined) stream.thinking(delta.thinking);
+    if (delta.text !== undefined) stream.text(delta.text);
+    // Last, so a chunk that failed to apply is not remembered as rendered.
+    if (extensions?.seq !== undefined) this.#lastSeq = extensions.seq;
+  }
+
+  /**
+   * Presume a silent stream dead.
+   *
+   * Armed only once this server has sent a heartbeat, and re-armed by every
+   * byte that arrives. Firing aborts the attempt's own controller — never the
+   * run's — so the consume loop sees a break and the reconnect loop takes
+   * over. Unref'd: a watchdog is a safety net over a stream the process is
+   * reading anyway, never a reason for the process to stay up.
+   */
+  #watchdog(attempt: AbortController): { touch(): void; stop(): void } {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    };
+    const touch = (): void => {
+      stop();
+      if (!this.#heartbeats) return;
+      timer = setTimeout(() => attempt.abort(), this.#reconnect.watchdogMs);
+      timer.unref();
+    };
+    return { touch, stop };
+  }
+
+  /**
+   * Reconnect to the run's stream, however long it takes.
+   *
+   * Backoff between tries, a bounded wait for the headers of each, and three
+   * answers that end the trying: the run is over (`[DONE]` arrives on the
+   * stream this returns), the server no longer has it, or the token no longer
+   * works. Anything else — unreachable, a 5xx, a handshake that never came —
+   * is the link still down, and the next try waits a little longer. The user's
+   * own stop ends it too, from any wait.
+   */
+  async #resume(root: string): Promise<{ body: ReadableStream<Uint8Array>; attempt: AbortController }> {
+    const { backoffMs } = this.#reconnect;
+    for (let tries = 0; ; tries += 1) {
+      await this.#pause(backoffMs[Math.min(tries, backoffMs.length - 1)] ?? 1_000);
+      if (this.#abort.signal.aborted) throw adapterError('cancelled', 'The run was stopped.');
+
+      const attempt = new AbortController();
+      const after = this.#lastSeq >= 0 ? `?after=${String(this.#lastSeq)}` : '';
+      const url = `${root}${API_PREFIX}/runs/${encodeURIComponent(String(this.#remoteRunId))}/stream${after}`;
+      // A handshake that never completes is a link that is still down. The
+      // timer covers the headers only: the body it guards is the whole point.
+      const handshake = setTimeout(() => attempt.abort(), RECONNECT_HANDSHAKE_MS);
+      handshake.unref();
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          headers: authHeaders(this.#input.env),
+          signal: AbortSignal.any([this.#abort.signal, attempt.signal]),
+        });
+      } catch (error) {
+        if (this.#abort.signal.aborted) throw error;
+        continue;
+      } finally {
+        clearTimeout(handshake);
+      }
+
+      if (response.ok && response.body !== null) return { body: response.body, attempt };
+      if (response.status === 404) {
+        throw adapterError(
+          'provider_unavailable',
+          'The Artemis server no longer has this run: it was reaped after nobody came back for it, the server restarted, or it predates resumable streams. The conversation itself is still there — send another message to continue it.',
+        );
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw adapterError(
+          'auth',
+          `The Artemis server refused the request (${String(response.status)}). Check this profile's connection token.`,
+        );
+      }
+      // Anything else is the server having a bad moment. Try again.
+    }
+  }
+
+  /** Sleep, unless the run is stopped first. */
+  #pause(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const signal = this.#abort.signal;
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      const done = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal.addEventListener('abort', done, { once: true });
+    });
+  }
+
+  /**
+   * A line in the transcript from this adapter rather than from the model.
+   *
+   * The same shape a provider's own refusal notice takes — synthetic assistant
+   * text on a message of its own — so the reader can tell "the link dropped"
+   * from something the agent said.
+   */
+  #notice(text: string): void {
+    this.#notices += 1;
+    this.#emit({
+      type: 'text.complete',
+      messageId: `${this.runId}-notice-${String(this.#notices)}` as MessageId,
+      role: 'assistant',
+      text,
+      synthetic: true,
+    } as never);
   }
 
   /** POST to a native run route with this profile's token and a short timeout. */
@@ -805,7 +1102,13 @@ async function fetchServerSessions(
   return rows;
 }
 
-export function createArtemisAdapter(): ProviderAdapter {
+export function createArtemisAdapter(
+  options: { readonly reconnect?: ArtemisReconnectOptions } = {},
+): ProviderAdapter {
+  const reconnect: Required<ArtemisReconnectOptions> = {
+    watchdogMs: options.reconnect?.watchdogMs ?? DEFAULT_WATCHDOG_MS,
+    backoffMs: options.reconnect?.backoffMs ?? DEFAULT_BACKOFF_MS,
+  };
   return {
     id: ARTEMIS_PROVIDER_ID,
     label: 'Artemis Server',
@@ -1017,7 +1320,7 @@ export function createArtemisAdapter(): ProviderAdapter {
           ),
         );
       }
-      return Promise.resolve(new ArtemisRun(input));
+      return Promise.resolve(new ArtemisRun(input, reconnect));
     },
   } as ProviderAdapter;
 }
