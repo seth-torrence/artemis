@@ -89,7 +89,7 @@ import type { ProviderId, SessionSummary } from '@rx-artemis/protocol';
 
 import { useCapability } from '../hooks/useCapability';
 import { keyLabel } from '../hooks/useHotkeys';
-import { formatRelative, oneLine } from '../lib/format';
+import { formatRelative, oneLine } from '@rx-artemis/transcript';
 import { shortenPath } from '../lib/paths';
 import {
   activeModels,

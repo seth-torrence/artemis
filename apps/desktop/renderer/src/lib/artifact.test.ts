@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { detectArtifact } from './artifact';
-import type { DiffRow, FileEdit } from './diff';
+import type { DiffRow, FileEdit } from '@rx-artemis/transcript';
 
 /** A whole-file write of `content` to `path`. */
 function wrote(path: string, extension: string, content: string): FileEdit {

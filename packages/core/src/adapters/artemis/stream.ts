@@ -29,6 +29,18 @@ export interface ServerExtensionsDelta {
    */
   readonly runId?: string;
   /**
+   * The resume cursor: the sequence number of the run event this chunk came
+   * from. Remembered by the adapter, and handed back on
+   * `GET /api/v0/runs/{id}/stream?after=N` when the stream has to be picked
+   * back up. Absent on the chunks that came from no event.
+   */
+  readonly seq?: number;
+  /**
+   * On a resumed stream: the server no longer holds everything after the
+   * cursor. What follows starts at `firstSeq`.
+   */
+  readonly gap?: { readonly afterSeq: number; readonly firstSeq: number };
+  /**
    * A permission prompt the run parked on, or the news that it no longer is.
    * Only present when the request opted into remote permissions; on any other
    * turn the server denies prompts on the spot and none of this crosses the
@@ -129,6 +141,11 @@ function readExtensions(value: unknown): ServerExtensionsDelta | undefined {
   if (runId !== undefined) out.runId = runId;
   const error = asString(record['error']);
   if (error !== undefined) out.error = error;
+  if (typeof record['seq'] === 'number' && Number.isInteger(record['seq'])) out.seq = record['seq'];
+  const gap = asRecord(record['gap']);
+  if (gap !== undefined && typeof gap['afterSeq'] === 'number' && typeof gap['firstSeq'] === 'number') {
+    out.gap = { afterSeq: gap['afterSeq'], firstSeq: gap['firstSeq'] };
+  }
 
   const permission = readPermissionNotice(record['permission']);
   if (permission !== undefined) out.permission = permission;

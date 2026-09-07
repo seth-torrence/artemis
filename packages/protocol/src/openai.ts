@@ -332,6 +332,27 @@ export interface ArtemisResponseExtensions {
   /** The true reason the run ended, when `finish_reason` had to flatten it. */
   readonly endReason?: string;
   /**
+   * The resume cursor: the sequence number of the run event this chunk was
+   * translated from.
+   *
+   * A stream can die under a client — a laptop sleeps, a tunnel drops — while
+   * the run it was watching goes on, kept alive by `artemis.remote.detach`.
+   * The client that comes back asks `GET /api/v0/runs/{runId}/stream?after=N`
+   * for everything after the last chunk it rendered, and this is the `N`. It
+   * rides on every chunk that came from an event; the run announcement and a
+   * session id learned from the run handle carry none, and a client may meet
+   * those twice without harm. Only on the streaming shape: a whole reply has
+   * nothing to resume.
+   */
+  readonly seq?: number;
+  /**
+   * On a resumed stream: the server no longer holds everything the client
+   * asked for. What follows starts at `firstSeq`; the events between the
+   * client's cursor and it are gone, and a client should say so rather than
+   * splice the halves together.
+   */
+  readonly gap?: { readonly afterSeq: number; readonly firstSeq: number };
+  /**
    * Why the run failed, when {@link endReason} is `error`.
    *
    * The streaming path had no way to say this. A failed turn ended with
@@ -355,6 +376,12 @@ export interface OpenAiChatChoice {
   readonly message: {
     readonly role: 'assistant';
     readonly content: string | null;
+    /**
+     * The model's reasoning, when the run produced any. See the same field on
+     * {@link OpenAiChatChunkChoice} for why it travels under this name and
+     * never inside `content`.
+     */
+    readonly reasoning_content?: string;
     readonly tool_calls?: readonly OpenAiToolCall[];
   };
   readonly finish_reason: OpenAiFinishReason;
@@ -380,6 +407,19 @@ export interface OpenAiChatChunkChoice {
   readonly delta: {
     readonly role?: 'assistant';
     readonly content?: string;
+    /**
+     * A fragment of the model's reasoning.
+     *
+     * Not an OpenAI field, and deliberately not folded into `content`: a
+     * client reading the answer must never receive the model's private
+     * working-out as though it were the reply. It rides under the name the
+     * reasoning-capable OpenAI-compatible servers already use (`vllm`,
+     * `llama.cpp`, DeepSeek), so a client that knows the field shows the
+     * reasoning and one that does not ignores it, exactly as it ignores the
+     * `artemis` namespace. Only ever the agent's own reasoning — a subagent's
+     * is reported as activity, not relayed.
+     */
+    readonly reasoning_content?: string;
     readonly tool_calls?: readonly unknown[];
   };
   readonly finish_reason: OpenAiFinishReason | null;

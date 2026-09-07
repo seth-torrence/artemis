@@ -70,6 +70,27 @@ export function basename(path: string): string {
   return parts.length > 0 ? (parts[parts.length - 1] as string) : path;
 }
 
+/**
+ * Order two directories the way a person looks for one: by folder name.
+ *
+ * By *name*, not by path, because the name is what a heading shows and what
+ * the user is scanning for; sorting on the whole path groups by whatever tree
+ * a project happens to live in, an order nobody can predict from the labels.
+ * The path breaks ties, so two `api` checkouts sit together in a fixed order
+ * rather than swapping between renders. `sensitivity: 'base'` keeps `Artemis`
+ * next to `artemis` instead of in an uppercase block; `numeric` puts `run-2`
+ * before `run-10`.
+ *
+ * Every folder list in Artemis — the desktop's sidebar and directory menus,
+ * the terminal's rail — sorts on this one comparator, so no two of them can
+ * read in different orders.
+ */
+export function compareFolderNames(a: string, b: string): number {
+  const collate = (x: string, y: string): number =>
+    x.localeCompare(y, undefined, { sensitivity: 'base', numeric: true });
+  return collate(basename(a), basename(b)) || collate(a, b);
+}
+
 /** Collapse whitespace and clip, for one-line summaries. */
 export function oneLine(text: string, max = 120): string {
   const flat = text.replace(/\s+/g, ' ').trim();

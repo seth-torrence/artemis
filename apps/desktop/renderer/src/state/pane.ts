@@ -70,9 +70,9 @@ import type {
 } from '@rx-artemis/protocol';
 import type { WorkspaceNames } from '../lib/extensions';
 import { detectArtifact } from '../lib/artifact';
-import { detectFileEdit } from '../lib/diff';
+import { detectFileEdit } from '@rx-artemis/transcript';
 import type { Platform } from '../lib/paths';
-import { TranscriptModel } from './transcript';
+import { TranscriptModel } from '@rx-artemis/transcript';
 
 /** Identifies a pane for the lifetime of the window. Not persisted. */
 export type PaneId = string;

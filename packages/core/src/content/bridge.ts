@@ -156,11 +156,14 @@ import {
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 
-import type { LocalPlugin } from '@rx-artemis/core';
+import type { LocalPlugin } from '../adapters/types.js';
 
-import { createLogger } from './log.js';
-
-const log = createLogger('content-bridge');
+/**
+ * Where a warning goes. Injected rather than imported: this module lives in
+ * core, which has no logger of its own, and each host reports differently —
+ * the desktop to its log file, the terminal to stderr.
+ */
+export type ContentWarning = (message: string, error: unknown) => void;
 
 /**
  * The plugin name, and therefore the prefix every bridged skill and command
@@ -372,6 +375,7 @@ export interface ContentBridgeOptions {
   readonly dataDir: string;
   /** Stand-in for `$HOME`. Overridden only by tests. */
   readonly home?: string;
+  readonly onWarning?: ContentWarning;
 }
 
 /**
@@ -419,7 +423,7 @@ export async function buildContentBridge(
 
     return [{ path: bridgeDir }];
   } catch (error) {
-    log.warn(
+    options.onWarning?.(
       `Could not bridge content for ${options.configDir}; the run continues without it`,
       error,
     );
@@ -527,6 +531,7 @@ export interface MarketplacePluginOptions {
   readonly configDir: string;
   /** Stand-in for `$HOME`. Overridden only by tests. */
   readonly home?: string;
+  readonly onWarning?: ContentWarning;
 }
 
 /**
@@ -581,7 +586,7 @@ export async function discoverMarketplacePlugins(
     }
     return plugins;
   } catch (error) {
-    log.warn(
+    options.onWarning?.(
       `Could not read marketplace plugins for ${options.configDir}; the run continues without them`,
       error,
     );
@@ -598,6 +603,7 @@ export interface CodexSkillLinkOptions {
   readonly configDir: string;
   /** Stand-in for `$HOME`. Overridden only by tests. */
   readonly home?: string;
+  readonly onWarning?: ContentWarning;
 }
 
 /**
@@ -686,6 +692,6 @@ export async function linkSkillsIntoCodexHome(options: CodexSkillLinkOptions): P
 
     for (const [name, target] of wanted) await symlink(target, join(destDir, name), 'dir');
   } catch (error) {
-    log.warn(`Could not link Codex skills into ${destDir}; the run continues without them`, error);
+    options.onWarning?.(`Could not link Codex skills into ${destDir}; the run continues without them`, error);
   }
 }

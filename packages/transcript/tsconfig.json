@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
+    /* "DOM" is here for names, not for a browser. `frameScheduler` in
+       transcript.ts refers to `requestAnimationFrame` and `setTimeout` behind a
+       `typeof` guard so it works in a window, under Node and under jsdom alike —
+       but the identifiers still have to resolve at compile time, and the base
+       lib is ES2023 only. No Node types, deliberately: the desktop renderer
+       compiles without them and must keep doing so with this package in its
+       graph. */
+    "lib": ["ES2023", "DOM"],
+    "types": []
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"],
+  "references": [{ "path": "../protocol" }]
+}

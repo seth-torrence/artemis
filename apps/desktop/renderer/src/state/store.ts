@@ -113,7 +113,7 @@ import {
   type WorkspaceNames,
 } from '../lib/extensions';
 import { detectArtifact, type Artifact } from '../lib/artifact';
-import { detectFileEdit } from '../lib/diff';
+import { detectFileEdit } from '@rx-artemis/transcript';
 import { isAbsolutePath, lastSegment } from '../lib/paths';
 import { newId } from '../lib/id';
 import { entriesFiling, sessionKey } from '../lib/sessionGroups';
@@ -159,7 +159,7 @@ import {
   type BrowserCommand,
   type BrowserId,
 } from '@rx-artemis/protocol';
-import { setEventsDroppedHook, type PermissionItem, type TranscriptModel } from './transcript';
+import { setEventsDroppedHook, type PermissionItem, type TranscriptModel } from '@rx-artemis/transcript';
 import {
   MIRRORED_KEYS,
   UNSTARTED_DRAFT,

@@ -168,7 +168,7 @@ import {
 import type { ProfileId, SessionSummary } from '@rx-artemis/protocol';
 
 import { useCapability, useProviderCapability } from '../hooks/useCapability';
-import { condenseTitle, formatRelative } from '../lib/format';
+import { condenseTitle, formatRelative } from '@rx-artemis/transcript';
 import { lastSegment } from '../lib/paths';
 import {
   flattenGroups,

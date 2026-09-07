@@ -338,6 +338,56 @@ export function bindingWindow(usage: PlanUsage | null | undefined): PlanUsageWin
   return rejected ?? worst;
 }
 
+/** One window a compact readout draws, under the short name it draws it with. */
+export interface PlanMeterSlot {
+  readonly id: string;
+  /** `5hr`, `Week`, `Fable` — or the provider's own label on a plan with none of those. */
+  readonly label: string;
+  readonly window: PlanUsageWindow;
+}
+
+/**
+ * The windows a glanceable readout draws, in order.
+ *
+ * The 5-hour limit, the weekly limit and Fable's own weekly bucket: the three
+ * worth watching without opening anything, and the same three on every
+ * surface — the desktop's status bar, its run navigator, the terminal's line
+ * under the composer — so no two of them disagree about which windows earn a
+ * place. Fable is matched by name, and only by name: it is the expensive
+ * model, metered apart from the plan total, and on an account that leans on
+ * it the limit that goes first. A plan that meters some other model gets two
+ * slots rather than a third standing in — a slot is a position you learn, and
+ * one whose subject changes with the account is a number you have to read the
+ * label to trust. The match is case-insensitive because the name is the
+ * provider's `display_name` verbatim: presentation, not an identifier.
+ *
+ * A window the plan does not report is *skipped* rather than drawn empty —
+ * "this plan has no weekly limit" must not read as "you have used none of
+ * it" — so this is up to three slots. Where none of the three exist, the
+ * window closest to full stands alone under the provider's own name, so a
+ * provider with its own vocabulary still shows a real number.
+ */
+export function planMeterSlots(usage: PlanUsage | null | undefined): readonly PlanMeterSlot[] {
+  if (!usage?.available) return [];
+  const slots: PlanMeterSlot[] = [];
+
+  const fiveHour = focusedWindow(usage, 'five_hour');
+  if (fiveHour !== null) slots.push({ id: fiveHour.id, label: '5hr', window: fiveHour });
+
+  const week = focusedWindow(usage, 'seven_day');
+  if (week !== null) slots.push({ id: week.id, label: 'Week', window: week });
+
+  const fable = usage.windows.find(
+    (w) => isModelScoped(w.id) && w.id.slice('model_scoped:'.length).toLowerCase() === 'fable',
+  );
+  if (fable !== undefined) slots.push({ id: fable.id, label: 'Fable', window: fable });
+
+  if (slots.length > 0) return slots;
+
+  const binding = bindingWindow(usage);
+  return binding === null ? [] : [{ id: binding.id, label: binding.label, window: binding }];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Headroom — which account has room left                                      */
 /* -------------------------------------------------------------------------- */

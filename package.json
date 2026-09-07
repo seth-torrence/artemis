@@ -12,7 +12,7 @@
   "scripts": {
     "dev": "pnpm run build:libs && pnpm --filter @rx-artemis/desktop dev",
     "build": "pnpm run build:libs && pnpm --filter @rx-artemis/desktop build",
-    "build:libs": "tsc -b packages/protocol packages/core",
+    "build:libs": "tsc -b packages/protocol packages/transcript packages/core",
     "typecheck": "tsc -b --pretty",
     "typecheck:clean": "tsc -b --clean && tsc -b --pretty",
     "smoke": "pnpm run build:libs && tsx scripts/smoke.ts",
@@ -27,7 +27,8 @@
     "clean": "tsc -b --clean && rimraf --glob \"**/dist\" \"**/out\" \"**/.tsbuild\" \"**/*.tsbuildinfo\"",
     "local:smoke": "tsx scripts/local-smoke.ts",
     "sandbox:check": "tsx scripts/sandbox-check.ts",
-    "opencode:attach": "tsx scripts/opencode-attach.ts"
+    "opencode:attach": "tsx scripts/opencode-attach.ts",
+    "tui": "tsc -b apps/tui && node apps/tui/dist/main.js"
   },
   "devDependencies": {
     "@rx-ventures/artemis-sdk": "workspace:*",

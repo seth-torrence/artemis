@@ -45,7 +45,7 @@ import type { Question, QuestionAnswer, QuestionPrompt } from '@rx-artemis/proto
 
 import { respondToPermission } from '../state/store';
 import { usePaneRef } from '../state/paneContext';
-import type { PermissionItem } from '../state/transcript';
+import type { PermissionItem } from '@rx-artemis/transcript';
 import { CodeBlock, Fold, ToneBadge } from './primitives';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';

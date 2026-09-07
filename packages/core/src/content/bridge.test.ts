@@ -47,7 +47,7 @@ import {
   buildContentBridge,
   discoverMarketplacePlugins,
   linkSkillsIntoCodexHome,
-} from './contentBridge.js';
+} from './bridge.js';
 
 const describeIfSymlinks = process.platform === 'win32' ? describe.skip : describe;
 

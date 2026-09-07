@@ -23,7 +23,7 @@ import {
 } from '@rx-artemis/protocol';
 
 import { useRoutines } from '@/hooks/useRoutines';
-import { formatRelative, formatUntil } from '../../lib/format';
+import { formatRelative, formatUntil } from '@rx-artemis/transcript';
 import { shortenPath } from '../../lib/paths';
 import { activeModels, useApp } from '../../state/store';
 import { usePane } from '../../state/paneContext';

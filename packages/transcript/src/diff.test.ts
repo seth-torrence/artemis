@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { detectFileEdit, type DiffRow } from './diff';
+import { detectFileEdit, type DiffRow } from './diff.js';
 
 /** Just the changed lines, as `+`/`−` prefixed text. */
 function changes(rows: readonly DiffRow[]): string[] {

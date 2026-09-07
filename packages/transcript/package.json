@@ -1,0 +1,34 @@
+{
+  "name": "@rx-artemis/transcript",
+  "version": "1.2.0",
+  "private": true,
+  "description": "The transcript model shared by every Artemis front end: the AgentEvent reducer, tool classification, edit diffing and display formatting. Framework-free and Node-free — it must compile with no DOM runtime and no @types/node.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@rx-artemis/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "~7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

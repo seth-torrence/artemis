@@ -10,6 +10,9 @@
  * │ ProviderAdapter / Run — the seam. One implementation per provider,   │
  * │ each mapping a wildly different transport onto the same AgentEvent   │
  * │ union and publishing a capability descriptor the UI degrades against.│
+ * ├── content ───────────────────────────────────────────────────────────┤
+ * │ buildContentBridge  the user's skills and commands, as a plugin a    │
+ * │                 run can load; marketplace plugins passed through     │
  * ├── profiles ──────────────────────────────────────────────────────────┤
  * │ ProfileStore    CRUD over account records — a label and a config dir │
  * │ resolveEnv      profile → the env bundle a run executes with         │
@@ -53,6 +56,7 @@
  */
 
 export * from './adapters/index.js';
+export * from './content/index.js';
 export * from './memorybanks/index.js';
 export * from './profiles/index.js';
 export * from './secrets/index.js';

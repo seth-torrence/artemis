@@ -24,6 +24,8 @@
  * a hover and never hides information.
  */
 
+import { compareFolderNames as compareFolderNamesShared } from '@rx-artemis/transcript';
+
 export type Platform = 'darwin' | 'win32' | 'linux';
 
 /** The separator paths on this platform are built from. */
@@ -211,10 +213,9 @@ export function sortFoldersByName(paths: readonly string[]): readonly string[] {
  * directory list in the app are the same question asked in two places, and two
  * copies of "by name, then by path, base sensitivity, numeric" would be two
  * chances for the sidebar to order itself differently from the picker that
- * chooses what goes in it.
+ * chooses what goes in it. The definition itself lives in
+ * `@rx-artemis/transcript`, where the terminal UI's rail reads it too.
  */
 export function compareFolderNames(a: string, b: string): number {
-  const collate = (x: string, y: string): number =>
-    x.localeCompare(y, undefined, { sensitivity: 'base', numeric: true });
-  return collate(lastSegment(a), lastSegment(b)) || collate(a, b);
+  return compareFolderNamesShared(a, b);
 }

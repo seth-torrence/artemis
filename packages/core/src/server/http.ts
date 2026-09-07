@@ -60,6 +60,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { PlanUsage } from '@rx-artemis/protocol';
 import type {
   AgentEvent,
+  OpenAiChatChunk,
   OpenAiChatRequest,
   OpenAiModelList,
   ProviderId,
@@ -88,6 +89,7 @@ import {
   SERVER_HEALTH_PATH,
   SERVER_HOST,
   SSE_DONE,
+  SSE_HEARTBEAT,
   connectionHasExpired,
   describeConnection,
   parseModelRoute,
@@ -101,8 +103,11 @@ import type { Catalogue } from './catalogue.js';
 import {
   chatChunk,
   chatResponse,
+  resumeTurn,
   runTurn,
+  type ResumeRequest,
   type RunSource,
+  type TurnEvent,
   type TurnResult,
 } from './completions.js';
 import { RunError } from '../sessions/errors.js';
@@ -1565,10 +1570,19 @@ function unknownSession(): ServerReply {
  */
 const OWNED_RUN_ACTIONS = new Set(['messages', 'permission', 'interrupt']);
 
+/**
+ * The one `GET` on an owned run: `GET /api/v0/runs/{id}/stream?after=N`, the
+ * completions stream picked back up. A verb of this surface and not the
+ * bridge's, because what it replays is the *completions* translation of the
+ * run — OpenAI-shaped chunks — which only this surface speaks; the bridge's
+ * `events` replay hands back raw engine events to a window.
+ */
+const OWNED_RUN_STREAM = 'stream';
+
 /** One completions run, and what its own client asked of it. */
 interface OwnedRunAction {
   readonly runId: RunId;
-  readonly action: 'messages' | 'permission' | 'interrupt';
+  readonly action: 'messages' | 'permission' | 'interrupt' | 'stream';
   /**
    * The connection owns this run. False only for `messages` and `permission`,
    * which are refused rather than passed on; an unowned `interrupt` never
@@ -1599,7 +1613,7 @@ function ownedCompletionsRunAction(
   method: string,
   path: string,
 ): OwnedRunAction | undefined {
-  if (method !== 'POST') return undefined;
+  if (method !== 'POST' && method !== 'GET') return undefined;
   const prefix = `/api/${SERVER_API_VERSION}/runs/`;
   if (!path.startsWith(prefix)) return undefined;
 
@@ -1607,7 +1621,11 @@ function ownedCompletionsRunAction(
   const separator = rest.indexOf('/');
   if (separator <= 0) return undefined;
   const action = rest.slice(separator + 1);
-  if (!OWNED_RUN_ACTIONS.has(action)) return undefined;
+  // `stream` is the only GET here; every other GET under `/runs` is the
+  // bridge's, and every POST here is one of the three verbs.
+  if (method === 'GET' ? action !== OWNED_RUN_STREAM : !OWNED_RUN_ACTIONS.has(action)) {
+    return undefined;
+  }
 
   let runId: string;
   try {
@@ -1645,7 +1663,7 @@ async function handleOwnedRunAction(
   connection: ServerConnection,
   request: ServerRequestInfo,
   route: OwnedRunAction,
-): Promise<ServerReply> {
+): Promise<ServerReply | ServerStreamReply> {
   if (!route.owned) return unknownRun();
 
   const runs = context.runs;
@@ -1681,10 +1699,74 @@ async function handleOwnedRunAction(
     record();
     return interruptOwnedRun(runs, route.runId);
   }
+  if (route.action === 'stream') {
+    record();
+    return streamOwnedRun(context, runs, directory, connection, request, route.runId);
+  }
   if (route.action === 'messages') {
     return sendToOwnedRun(runs, route.runId, request.body, record);
   }
   return answerOwnedPermission(runs, directory, route.runId, request.body, record);
+}
+
+/**
+ * Pick an owned run's completions stream back up.
+ *
+ * The client lost its socket with the run still going — `artemis.remote.detach`
+ * kept it — and is back with the last cursor it rendered. What it gets is the
+ * same stream it would have had: every chunk after that cursor, translated
+ * exactly as the original request translated them, then the live tail until
+ * the run ends. See `resumeTurn` for what is replayed and what is not.
+ *
+ * Attaching is recorded on the directory as the opposite of detaching: the
+ * run's own deadline stops and its parked prompts' deadline starts, because
+ * somebody is in front of them again. When this stream goes too, the run is
+ * handed back to the directory as it was the first time.
+ */
+function streamOwnedRun(
+  context: ServerContext,
+  runs: RunSource,
+  directory: RunDirectory,
+  connection: ServerConnection,
+  request: ServerRequestInfo,
+  runId: RunId,
+): ServerReply | ServerStreamReply {
+  const url = new URL(request.url, 'http://artemis.invalid');
+  const rawAfter = url.searchParams.get('after');
+  let afterSeq: number | undefined;
+  if (rawAfter !== null) {
+    if (!/^\d+$/.test(rawAfter)) {
+      return fail(400, 'invalid_request_error', 'invalid_after', '`after` must be a whole number.');
+    }
+    afterSeq = Number(rawAfter);
+  }
+
+  directory.noteAttached(runId);
+
+  const resume: ResumeRequest = {
+    runId,
+    ...(afterSeq === undefined ? {} : { afterSeq }),
+    ...(request.signal === undefined ? {} : { signal: request.signal }),
+    onDetach: (id: RunId) => directory.noteDetached(id),
+  };
+  return {
+    status: 200,
+    headers: {
+      ...CORS_HEADERS,
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+    },
+    connectionId: connection.id,
+    stream: streamResume({
+      id: `chatcmpl-${Math.random().toString(36).slice(2, 12)}`,
+      created: Math.floor(Date.now() / 1000),
+      route: directory.routeOf(runId) ?? 'artemis',
+      runs,
+      request: resume,
+      heartbeatMs: context.remoteStream?.heartbeatMs ?? DEFAULT_COMPLETIONS_HEARTBEAT_MS,
+    }),
+  };
 }
 
 /**
@@ -2482,6 +2564,7 @@ async function handleChatCompletions(
       runId,
       connectionId: connection.id,
       permissions: extensions.remote?.permissions === true,
+      route: model.route,
     });
   };
   const turn = {
@@ -2539,6 +2622,7 @@ async function handleChatCompletions(
         model,
         record,
         claim,
+        heartbeatMs: context.remoteStream?.heartbeatMs ?? DEFAULT_COMPLETIONS_HEARTBEAT_MS,
         ...(context.onRunFailure === undefined ? {} : { report: context.onRunFailure }),
       }),
     };
@@ -2580,13 +2664,214 @@ async function handleChatCompletions(
   });
 }
 
+/** How often a quiet completions stream writes a comment. See {@link paced}. */
+const DEFAULT_COMPLETIONS_HEARTBEAT_MS = 15_000;
+
+/** What {@link paced} yields when its source has been quiet for a heartbeat. */
+const HEARTBEAT = Symbol('heartbeat');
+
+/**
+ * Pull from a generator, and say something when it has nothing to say.
+ *
+ * An SSE stream that is silent for minutes — an agent inside a long tool call
+ * produces no chunk, because activity is reported on the final chunk rather
+ * than streamed — is indistinguishable, from the client's side, from a
+ * connection that has died. The bridge's feed solved this with a heartbeat
+ * comment; the completions stream had none, so a client could not tell a
+ * working agent from a dead socket, and a NAT or relay with an idle timeout
+ * could cut a quiet stream without either side noticing until the next write.
+ * This is the same heartbeat for this stream: while the source has no next
+ * value within `heartbeatMs`, a comment is yielded instead and the source's
+ * pending `next()` is raced again — never called twice.
+ *
+ * `finally` returns the source, so a consumer that walks away (a client that
+ * hung up) tears the turn down exactly as `for await` would have.
+ */
+async function* paced<T>(
+  source: AsyncGenerator<T>,
+  heartbeatMs: number,
+): AsyncGenerator<T | typeof HEARTBEAT> {
+  try {
+    let next = source.next();
+    for (;;) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const tick = new Promise<typeof HEARTBEAT>((resolve) => {
+        timer = setTimeout(() => resolve(HEARTBEAT), heartbeatMs);
+      });
+      const outcome = await Promise.race([next, tick]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (outcome === HEARTBEAT) {
+        yield HEARTBEAT;
+        continue;
+      }
+      if (outcome.done === true) return;
+      yield outcome.value;
+      next = source.next();
+    }
+  } finally {
+    await source.return(undefined);
+  }
+}
+
+/** The three fields every chunk of one stream shares. */
+interface ChunkFrame {
+  readonly id: string;
+  readonly model: string;
+  readonly created: number;
+}
+
+/**
+ * One turn event as the chunk that carries it, or `undefined` for one that
+ * rides on no chunk of its own.
+ *
+ * Shared by the original stream and a resumed one, which is the point: a
+ * client that comes back must be shown the same bytes for the same event it
+ * would have seen had its socket held. Every chunk translated from a run event
+ * carries that event's `seq` on the Artemis namespace — the cursor a client
+ * resumes from — and the ones that come from nowhere in the event stream
+ * carry none.
+ */
+function chunkFor(
+  event: TurnEvent,
+  frame: ChunkFrame,
+  hooks: {
+    /** Called once with the run's id, before anything else is written. */
+    readonly claim?: (runId: string) => void;
+    /** Called with every session id the run announces. See the ledger. */
+    readonly record?: (sessionId: string) => void;
+    /** Where a failed run is said out loud on the serving machine. */
+    readonly report?: (error: unknown) => void;
+  },
+): OpenAiChatChunk | undefined {
+  const seq = event.seq === undefined ? {} : { seq: event.seq };
+  const stamped = (extensions: Record<string, unknown>) =>
+    Object.keys(extensions).length === 0 && event.seq === undefined
+      ? {}
+      : { artemis: { ...extensions, ...seq } as OpenAiChatChunk['artemis'] };
+
+  switch (event.kind) {
+    case 'text':
+      return chatChunk({ ...frame, delta: { content: event.text }, ...stamped({}) });
+
+    // The agent's reasoning, on the field the reasoning-capable OpenAI-shaped
+    // servers already use and never on `content`. An OpenAI client that does
+    // not know the field appends nothing; an Artemis client draws a thinking
+    // row from it — which is the whole reason it is here: without it, a
+    // served turn showed its answer and none of the thinking behind it.
+    case 'thinking':
+      return chatChunk({ ...frame, delta: { reasoning_content: event.text }, ...stamped({}) });
+
+    // The run id, first of everything the turn has to say, and on the same
+    // empty-delta chunk the session id rides — an OpenAI client appends
+    // nothing and moves on. This is the only place a completions caller can
+    // learn the id, and the run actions take it, so a client that means to
+    // steer or reattach after the stream breaks has to be holding it before
+    // it does.
+    case 'run':
+      hooks.claim?.(event.runId);
+      return chatChunk({ ...frame, delta: {}, ...stamped({ runId: event.runId }) });
+
+    // A prompt the run is parked on, or the news that it is settled. Only for
+    // a caller that asked for these; see `ArtemisRemoteOptions`. Its answer
+    // comes back on POST /api/v0/runs/{runId}/permission rather than on this
+    // stream, because a stream is one-way and this one is often already dead
+    // by the time anyone looks at the question.
+    case 'permission':
+      return chatChunk({ ...frame, delta: {}, ...stamped({ permission: event.notice }) });
+
+    // The session id, the moment the run reports one — an empty delta with
+    // only the Artemis namespace filled in. OpenAI clients append nothing and
+    // move on; an Artemis client resumes from it, and a stream that dies
+    // mid-turn has still told its caller where the conversation lives. The
+    // final chunk repeats it, which is what pre-existing clients read.
+    case 'session':
+      hooks.record?.(event.sessionId);
+      return chatChunk({ ...frame, delta: {}, ...stamped({ sessionId: event.sessionId }) });
+
+    // Only ever on a resumed stream: the server no longer holds everything
+    // that was asked for, and says so before sending what it has.
+    case 'gap':
+      return chatChunk({
+        ...frame,
+        delta: {},
+        ...stamped({ gap: { afterSeq: event.afterSeq, firstSeq: event.firstSeq } }),
+      });
+
+    // `activity` is not streamed as its own event: an OpenAI client parses
+    // every `data:` line as a chunk, and one it cannot parse is a hard error
+    // in most SDKs. It rides on the final chunk instead.
+    case 'activity':
+      return undefined;
+
+    case 'done': {
+      const { result } = event;
+      if (result.sessionId !== undefined) hooks.record?.(result.sessionId);
+      // Said out loud on the way past. A streamed failure reaches its caller,
+      // so it is not what `onError` was written for — but it left no trace
+      // anywhere on the serving machine either, and "the run failed" with the
+      // reason only ever travelling *away* from the server is what made this
+      // undiagnosable from the side that could actually fix it.
+      if (result.error !== undefined) {
+        hooks.report?.(new Error(`run on ${frame.model} failed: ${result.error}`));
+      }
+      return chatChunk({
+        ...frame,
+        delta: {},
+        finishReason: result.finishReason,
+        ...(result.usage === undefined ? {} : { usage: result.usage }),
+        artemis: {
+          ...(result.sessionId === undefined ? {} : { sessionId: result.sessionId }),
+          ...(result.activity.length === 0 ? {} : { activity: result.activity }),
+          endReason: result.endReason,
+          /*
+           * The reason, on the only chunk that can carry it.
+           *
+           * A stream cannot answer 502 — the 200 went out with the headers
+           * — so where the whole-response path returns `result.error` as
+           * the body of one, this is the only place the same sentence can
+           * be said. Without it a streaming client sees `endReason:
+           * "error"` on an empty delta and has nothing to render but a
+           * guess, which is exactly what every remote failure looked like:
+           * a run that never started, reported as an unexplained one.
+           */
+          ...(result.error === undefined ? {} : { error: result.error }),
+          ...seq,
+        },
+      });
+    }
+
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * A mid-stream failure, as the chunk that stops the stream cleanly.
+ *
+ * A stream cannot change its status code — the 200 went out with the headers
+ * — so the failure is reported *in* the stream. A client that sees the socket
+ * close without `[DONE]` reports a network error, which is the wrong
+ * diagnosis.
+ */
+function failureChunk(frame: ChunkFrame, error: unknown): OpenAiChatChunk {
+  return chatChunk({
+    ...frame,
+    delta: {
+      content: `\n\n[the run failed: ${error instanceof Error ? error.message : 'unknown error'}]`,
+    },
+    finishReason: 'stop',
+  });
+}
+
 /**
  * The same turn, as Server-Sent Events.
  *
  * The shape is OpenAI's exactly: a first chunk carrying the role, then one per
  * text fragment, then a chunk with `finish_reason`, then `[DONE]`. Clients
  * depend on that order — several treat the first chunk as the signal that the
- * stream is live, and every one of them stops at the sentinel.
+ * stream is live, and every one of them stops at the sentinel. A quiet stretch
+ * carries a comment every `heartbeatMs`, which the sentinel-reading clients
+ * ignore by definition and an Artemis client uses to tell silence from death.
  */
 async function* streamTurn(input: {
   readonly id: string;
@@ -2600,141 +2885,67 @@ async function* streamTurn(input: {
   readonly claim?: (runId: string) => void;
   /** Where a failed run is said out loud on the serving machine. */
   readonly report?: (error: unknown) => void;
+  readonly heartbeatMs?: number;
 }): AsyncIterable<string> {
   const { id, created, model } = input;
+  const frame: ChunkFrame = { id, model: model.route, created };
+  const hooks = {
+    ...(input.claim === undefined ? {} : { claim: input.claim }),
+    ...(input.record === undefined ? {} : { record: input.record }),
+    ...(input.report === undefined ? {} : { report: input.report }),
+  };
 
-  yield sseEvent(
-    chatChunk({ id, model: model.route, created, delta: { role: 'assistant' } }),
-  );
+  yield sseEvent(chatChunk({ ...frame, delta: { role: 'assistant' } }));
 
   try {
-    for await (const event of runTurn(input.runs, input.turn)) {
-      if (event.kind === 'text') {
-        yield sseEvent(chatChunk({ id, model: model.route, created, delta: { content: event.text } }));
+    const source = paced(
+      runTurn(input.runs, input.turn),
+      input.heartbeatMs ?? DEFAULT_COMPLETIONS_HEARTBEAT_MS,
+    );
+    for await (const item of source) {
+      if (item === HEARTBEAT) {
+        yield SSE_HEARTBEAT;
         continue;
       }
-
-      // The run id, first of everything the turn has to say, and on the same
-      // empty-delta chunk the session id rides — an OpenAI client appends
-      // nothing and moves on. This is the only place a completions caller can
-      // learn the id, and the three run actions take it, so a client that means
-      // to steer or reattach after the stream breaks has to be holding it
-      // before it does.
-      if (event.kind === 'run') {
-        input.claim?.(event.runId);
-        yield sseEvent(
-          chatChunk({
-            id,
-            model: model.route,
-            created,
-            delta: {},
-            artemis: { runId: event.runId },
-          }),
-        );
-        continue;
-      }
-
-      // A prompt the run is parked on, or the news that it is settled. Only for
-      // a caller that asked for these; see `ArtemisRemoteOptions`. Its answer
-      // comes back on POST /api/v0/runs/{runId}/permission rather than on this
-      // stream, because a stream is one-way and this one is often already dead
-      // by the time anyone looks at the question.
-      if (event.kind === 'permission') {
-        yield sseEvent(
-          chatChunk({
-            id,
-            model: model.route,
-            created,
-            delta: {},
-            artemis: { permission: event.notice },
-          }),
-        );
-        continue;
-      }
-
-      // The session id, the moment the run reports one — an empty delta with
-      // only the Artemis namespace filled in. OpenAI clients append nothing and
-      // move on; an Artemis client resumes from it, and a stream that dies
-      // mid-turn has still told its caller where the conversation lives. The
-      // final chunk repeats it, which is what pre-existing clients read.
-      if (event.kind === 'session') {
-        input.record?.(event.sessionId);
-        yield sseEvent(
-          chatChunk({
-            id,
-            model: model.route,
-            created,
-            delta: {},
-            artemis: { sessionId: event.sessionId },
-          }),
-        );
-        continue;
-      }
-
-      if (event.kind === 'done') {
-        const { result } = event;
-        if (result.sessionId !== undefined) input.record?.(result.sessionId);
-        // Said out loud on the way past. A streamed failure reaches its caller,
-        // so it is not what `onError` was written for — but it left no trace
-        // anywhere on the serving machine either, and "the run failed" with the
-        // reason only ever travelling *away* from the server is what made this
-        // undiagnosable from the side that could actually fix it.
-        if (result.error !== undefined) {
-          input.report?.(new Error(`run on ${model.route} failed: ${result.error}`));
-        }
-        yield sseEvent(
-          chatChunk({
-            id,
-            model: model.route,
-            created,
-            delta: {},
-            finishReason: result.finishReason,
-            ...(result.usage === undefined ? {} : { usage: result.usage }),
-            artemis: {
-              ...(result.sessionId === undefined ? {} : { sessionId: result.sessionId }),
-              ...(result.activity.length === 0 ? {} : { activity: result.activity }),
-              endReason: result.endReason,
-              /*
-               * The reason, on the only chunk that can carry it.
-               *
-               * A stream cannot answer 502 — the 200 went out with the headers
-               * — so where the whole-response path returns `result.error` as
-               * the body of one, this is the only place the same sentence can
-               * be said. Without it a streaming client sees `endReason:
-               * "error"` on an empty delta and has nothing to render but a
-               * guess, which is exactly what every remote failure looked like:
-               * a run that never started, reported as an unexplained one.
-               */
-              ...(result.error === undefined ? {} : { error: result.error }),
-            },
-          }),
-        );
-      }
-      // `activity` is not streamed as its own event: an OpenAI client parses
-      // every `data:` line as a chunk, and one it cannot parse is a hard error
-      // in most SDKs. It rides on the final chunk instead.
+      const chunk = chunkFor(item, frame, hooks);
+      if (chunk !== undefined) yield sseEvent(chunk);
     }
   } catch (error) {
-    /*
-     * A stream cannot change its status code — the 200 went out with the
-     * headers — so a mid-stream failure is reported *in* the stream, as a final
-     * chunk that stops cleanly. A client that sees the socket close without
-     * `[DONE]` reports a network error, which is the wrong diagnosis.
-     */
-    yield sseEvent(
-      chatChunk({
-        id,
-        model: model.route,
-        created,
-        delta: {
-          content: `\n\n[the run failed: ${
-            error instanceof Error ? error.message : 'unknown error'
-          }]`,
-        },
-        finishReason: 'stop',
-      }),
-    );
+    yield sseEvent(failureChunk(frame, error));
   }
 
+  yield sseEvent(SSE_DONE);
+}
+
+/**
+ * A run's completions stream, picked back up after its cursor.
+ *
+ * No role chunk: the client that asks for this already has the message open
+ * and is appending to it. Otherwise the same bytes the original stream would
+ * have carried, from the same translation, with the same heartbeat — and the
+ * same sentinel at the end, so a client can tell "the run is over" from "the
+ * socket died again".
+ */
+async function* streamResume(input: {
+  readonly id: string;
+  readonly created: number;
+  readonly route: string;
+  readonly runs: RunSource;
+  readonly request: ResumeRequest;
+  readonly heartbeatMs: number;
+}): AsyncIterable<string> {
+  const frame: ChunkFrame = { id: input.id, model: input.route, created: input.created };
+  try {
+    for await (const item of paced(resumeTurn(input.runs, input.request), input.heartbeatMs)) {
+      if (item === HEARTBEAT) {
+        yield SSE_HEARTBEAT;
+        continue;
+      }
+      const chunk = chunkFor(item, frame, {});
+      if (chunk !== undefined) yield sseEvent(chunk);
+    }
+  } catch (error) {
+    yield sseEvent(failureChunk(frame, error));
+  }
   yield sseEvent(SSE_DONE);
 }
