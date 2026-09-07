@@ -1,6 +1,12 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.11.0
+
+**Find a word in the conversation — `Ctrl+F`, or `⌘F` on a Mac.** The search in the header finds sessions, files and commands; it could take you to a conversation and never to a line inside one. Now the key everyone already presses opens a find bar over the column you are reading: type a phrase, `Enter` and `Shift+Enter` walk the matches and wrap, `Escape` closes it and keeps what you typed for the next time. It searches the conversation itself rather than the part of it that happens to be on screen, which is the difference that matters in a working session: a phrase inside a burst of forty tool calls that was drawn as a single marker is counted, takes its turn in the cycle, and takes you to the marker hiding it. Matches on screen are highlighted without a single message being re-rendered.
+
+**A parked question can stand aside while you read.** A question, an approval or a plan is pinned above the prompt box until you answer it, which is right for answering and wrong for deciding — on a small screen the ask covers the conversation you need to read before you can answer. It minimises now, to one line saying what is waiting and the button that brings it back. Minimising cannot lose the ask: the line and the count stay, a request that arrives while it is minimised is counted rather than forced open, the marker in the transcript still opens it on the way to the card, and the whole thing is forgotten once you have answered everything.
+
 ## What's new in 2.10.0
 
 **`#123` is a link on every git host.** A pull request named the way people name one — `#134`, `david/cortex#4`, "see PR #98" — linked only when the working directory's `origin` was on github.com; on a Forgejo, Gitea, GitLab or Bitbucket checkout, or any self-hosted server, it stayed dead text. The `origin` remote is read on any host now, in all three spellings git uses for it, and the link is spelled the way that host spells a pull request: `/pull/` on GitHub, `/-/merge_requests/` on GitLab, `/pull-requests/` on Bitbucket, and `/pulls/` on Gitea, Forgejo and any server whose name says nothing about what it runs. A server that does not say can be told: `[artemis] forge = gitlab` in the repository's `.git/config` settles it. `owner/repo#12` on a self-hosted checkout names the neighbouring repository there; with no checkout to say otherwise it still means github.com, as it always has.
