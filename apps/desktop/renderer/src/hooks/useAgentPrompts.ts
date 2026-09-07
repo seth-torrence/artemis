@@ -43,9 +43,10 @@ import type {
   AgentPrompt,
   AgentPromptsDocument,
   ArtemisBridge,
+  BuiltInPromptId,
   MemoryBankPromptInfo,
 } from '@rx-artemis/protocol';
-import { AGENT_PROMPTS_VERSION } from '@rx-artemis/protocol';
+import { AGENT_PROMPTS_VERSION, withBuiltInRemoved, withBuiltInRestored } from '@rx-artemis/protocol';
 
 import { call, resolveBridge } from '../lib/bridge';
 
@@ -74,6 +75,13 @@ export interface AgentPromptsPane {
   /** Why the *read* failed. A failed read is fatal to the pane; a failed write is not. */
   readonly error: string | null;
   readonly prompts: readonly AgentPrompt[];
+  /**
+   * Artemis's own prompts the user has removed. Kept beside the list rather
+   * than derived from it, because "not in the list" is also what a library
+   * written before a built-in existed looks like, and the two must save
+   * differently — see `AgentPromptsDocument.dismissedBuiltIns`.
+   */
+  readonly dismissedBuiltIns: readonly BuiltInPromptId[];
   /** This machine's banks, for previewing a built-in as it will be sent. */
   readonly memoryBanks: readonly MemoryBankPromptInfo[];
   readonly saveState: SaveState;
@@ -82,9 +90,16 @@ export interface AgentPromptsPane {
    *
    * One mutator rather than add/update/remove/reorder, because every one of
    * those is "here is the new list" and four channels into one debounced writer
-   * is four places for the debounce to be reset from.
+   * is four places for the debounce to be reset from. The two below are the
+   * exceptions that prove it: removing a built-in is not "here is the new
+   * list", it is a list *and* a record, and the record is what keeps the read
+   * from putting the row back.
    */
   readonly setPrompts: (next: readonly AgentPrompt[]) => void;
+  /** Remove one of Artemis's prompts, durably. `restoreBuiltIn` brings it back. */
+  readonly removeBuiltIn: (id: BuiltInPromptId) => void;
+  /** Put a removed built-in back, in its shipped state. */
+  readonly restoreBuiltIn: (id: BuiltInPromptId) => void;
 }
 
 function channel(): ArtemisBridge['agentPrompts'] | null {
@@ -95,6 +110,7 @@ export function useAgentPrompts(): AgentPromptsPane {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [prompts, setLocalPrompts] = useState<readonly AgentPrompt[]>([]);
+  const [dismissedBuiltIns, setDismissedBuiltIns] = useState<readonly BuiltInPromptId[]>([]);
   /*
    * The banks main saw at read time, kept only so a built-in previews as the
    * text a run would carry. Never written back and never part of a save: these
@@ -111,12 +127,12 @@ export function useAgentPrompts(): AgentPromptsPane {
    * when they were created. A ref is the value *now*, which is the only value a
    * save should ever be built from.
    */
-  const pending = useRef<readonly AgentPrompt[] | null>(null);
+  const pending = useRef<AgentPromptsDocument | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flush = useCallback(async (): Promise<void> => {
-    const next = pending.current;
-    if (next === null) return;
+    const document = pending.current;
+    if (document === null) return;
     pending.current = null;
 
     const bridge = channel();
@@ -125,7 +141,6 @@ export function useAgentPrompts(): AgentPromptsPane {
       return;
     }
 
-    const document: AgentPromptsDocument = { version: AGENT_PROMPTS_VERSION, prompts: next };
     const result = await call(() => bridge.save({ document }));
     if (!result.ok) {
       setSaveState({ kind: 'error', message: result.error.message });
@@ -165,6 +180,7 @@ export function useAgentPrompts(): AgentPromptsPane {
       }
       setError(null);
       setLocalPrompts(result.value.document.prompts);
+      setDismissedBuiltIns(result.value.document.dismissedBuiltIns ?? []);
       setMemoryBanks(result.value.memoryBanks);
     })();
 
@@ -177,9 +193,24 @@ export function useAgentPrompts(): AgentPromptsPane {
   /* Edits                                                                   */
   /* ---------------------------------------------------------------------- */
 
-  const setPrompts = useCallback(
-    (next: readonly AgentPrompt[]) => {
-      setLocalPrompts(next);
+  /**
+   * The document as the pane currently has it, for a mutator to start from.
+   *
+   * A ref for the same reason `pending` is one: `removeBuiltIn` closes over
+   * whatever `prompts` was when it was created, and a removal that started from
+   * a stale list would resurrect an edit made since.
+   */
+  const current = useRef<AgentPromptsDocument>({ version: AGENT_PROMPTS_VERSION, prompts: [] });
+  current.current = {
+    version: AGENT_PROMPTS_VERSION,
+    prompts,
+    ...(dismissedBuiltIns.length === 0 ? {} : { dismissedBuiltIns }),
+  };
+
+  const commit = useCallback(
+    (next: AgentPromptsDocument) => {
+      setLocalPrompts(next.prompts);
+      setDismissedBuiltIns(next.dismissedBuiltIns ?? []);
       setSaveState({ kind: 'saving' });
       pending.current = next;
       if (timer.current !== null) clearTimeout(timer.current);
@@ -189,6 +220,19 @@ export function useAgentPrompts(): AgentPromptsPane {
       }, SAVE_DEBOUNCE_MS);
     },
     [flush],
+  );
+
+  const setPrompts = useCallback(
+    (next: readonly AgentPrompt[]) => commit({ ...current.current, prompts: next }),
+    [commit],
+  );
+  const removeBuiltIn = useCallback(
+    (id: BuiltInPromptId) => commit(withBuiltInRemoved(current.current, id)),
+    [commit],
+  );
+  const restoreBuiltIn = useCallback(
+    (id: BuiltInPromptId) => commit(withBuiltInRestored(current.current, id)),
+    [commit],
   );
 
   // The flush that makes the debounce safe. See the note on this module: the
@@ -201,5 +245,15 @@ export function useAgentPrompts(): AgentPromptsPane {
     };
   }, [flush]);
 
-  return { loading, error, prompts, memoryBanks, saveState, setPrompts };
+  return {
+    loading,
+    error,
+    prompts,
+    dismissedBuiltIns,
+    memoryBanks,
+    saveState,
+    setPrompts,
+    removeBuiltIn,
+    restoreBuiltIn,
+  };
 }

@@ -113,6 +113,7 @@ import {
   ChevronRightIcon,
   CopyIcon,
   EllipsisVerticalIcon,
+  FilesIcon,
   FolderIcon,
   GlobeIcon,
   LoaderCircleIcon,
@@ -128,6 +129,7 @@ import {
   XIcon,
 } from 'lucide-react';
 
+import { useDocuments } from '../hooks/useDocuments';
 import { keyLabel } from '../hooks/useHotkeys';
 import { useWindowState } from '../hooks/useWindowState';
 import { installUpdate, restartForUpdate, useUpdateState } from '../hooks/useUpdateState';
@@ -145,6 +147,7 @@ import {
   splitPane,
   togglePalette,
   toggleBrowser,
+  toggleDocuments,
   toggleFiles,
   toggleTasks,
   toggleTerminal,
@@ -324,6 +327,10 @@ export function AppHeader(): ReactElement {
   // open, and a selector returning the array would re-render the header on every
   // progress message the delegated work emits.
   const delegated = usePane((s) => s.tasks.length);
+  // The same shape for the documents: the row shows how many there are, and
+  // the list behind it is recomputed only when a document arrives — the
+  // artifacts snapshot it reads keeps its identity through every token.
+  const documents = useDocuments().length;
   // Subscribed once, here, and passed down. Two components calling the hook
   // would open two IPC subscriptions to describe one window.
   const windowState = useWindowState();
@@ -415,7 +422,7 @@ export function AppHeader(): ReactElement {
       <div className="flex min-w-fit flex-1 basis-0 items-center justify-end gap-1">
         <UpdateChip />
         <WaitingBadge />
-        <OpenMenu delegated={delegated} pane={pane} />
+        <OpenMenu delegated={delegated} documents={documents} pane={pane} />
         <IconButton
           label={`Settings (${keyLabel('mod+,')})`}
           onClick={() => openSettings()}
@@ -461,12 +468,24 @@ export function AppHeader(): ReactElement {
  * Delegated work keeps its disabled-with-reason contract from the button it
  * replaces: shown, struck through by the platform's disabled styling, with the
  * sentence in `title` — never hidden.
+ *
+ * Documents is the row that answers "where did that report go". Every
+ * document the agent makes is a tile in the thread, where it was made — which
+ * is the right place while the reader is there and forty screens up an hour
+ * later. The row opens the index of them in the dock, and carries the count
+ * the way Delegated does, so the menu says whether there is anything to find
+ * before it is opened. Never disabled: a conversation that has made nothing
+ * has an empty list that says so, and a struck-through row on exactly the
+ * conversation where someone wonders whether anything was made would be the
+ * menu refusing to answer the question.
  */
 function OpenMenu({
   delegated,
+  documents,
   pane,
 }: {
   readonly delegated: number;
+  readonly documents: number;
   readonly pane: ReturnType<typeof usePaneRef>;
 }): ReactElement {
   return (
@@ -493,6 +512,11 @@ function OpenMenu({
         <DropdownMenuItem onSelect={() => toggleFiles(pane)}>
           <FolderIcon />
           Working folder
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => toggleDocuments(pane)}>
+          <FilesIcon />
+          Documents
+          {documents > 0 ? <DropdownMenuShortcut>{documents}</DropdownMenuShortcut> : null}
         </DropdownMenuItem>
         <DropdownMenuItem
           disabled={delegated === 0}

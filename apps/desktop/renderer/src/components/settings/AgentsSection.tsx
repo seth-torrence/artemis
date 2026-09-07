@@ -211,11 +211,32 @@ export function AgentPromptsGroups({
                 />
               ))}
             </div>
-            <div className="px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2.5">
               <Button size="sm" variant="outline" onClick={addPrompt}>
                 <PlusIcon aria-hidden="true" />
                 New prompt
               </Button>
+              {/* One of Artemis's prompts the user removed can be met again.
+                  Offered here, beside "New prompt", because that is what it
+                  is: adding a prompt to the library, in its shipped state —
+                  not an undo of the removal, which took the user's edits to
+                  it along. Absent when nothing was removed, so a library that
+                  never touched a built-in reads exactly as it did. */}
+              {pane.dismissedBuiltIns.map((id) => (
+                <Button
+                  key={id}
+                  size="sm"
+                  variant="ghost"
+                  className="text-ink-faint"
+                  onClick={() => {
+                    pane.restoreBuiltIn(id);
+                    setSelectedId(id);
+                  }}
+                >
+                  <RotateCcwIcon aria-hidden="true" />
+                  Bring back “{BUILT_IN_AGENT_PROMPTS[id]?.name ?? id}”
+                </Button>
+              ))}
             </div>
           </SettingsGroup>
 
@@ -395,6 +416,13 @@ function PromptEditor({
   };
 
   const remove = (): void => {
+    // A built-in is removed through the pane's own mutator, which also records
+    // the removal — filtering the row out alone would have it back on the next
+    // read. See `AgentPromptsDocument.dismissedBuiltIns`.
+    if (prompt.builtIn !== undefined) {
+      pane.removeBuiltIn(prompt.builtIn);
+      return;
+    }
     pane.setPrompts(pane.prompts.filter((p) => p.id !== prompt.id));
   };
 
@@ -426,12 +454,19 @@ function PromptEditor({
             )}{' '}
             It is only sent when {builtIn.requires}.
           </p>
-          {editableBuiltIn && overridden ? (
-            <Button size="sm" variant="outline" onClick={reset} className="shrink-0">
-              <RotateCcwIcon aria-hidden="true" />
-              Reset to Artemis's default
-            </Button>
-          ) : null}
+          <div className="flex shrink-0 items-center gap-1">
+            {editableBuiltIn && overridden ? (
+              <Button size="sm" variant="outline" onClick={reset}>
+                <RotateCcwIcon aria-hidden="true" />
+                Reset to Artemis's default
+              </Button>
+            ) : null}
+            <DeleteButton
+              name={prompt.name}
+              onConfirm={remove}
+              description="Artemis's text stays with Artemis, so nothing is lost: “Bring back” under the list puts it back in its shipped state. Any edits or narrowing you made to it go with the row. To stop sending it without removing it, turn it off instead."
+            />
+          </div>
         </div>
       ) : (
         <div className="flex items-end gap-2 px-3 py-2.5">
@@ -504,9 +539,12 @@ function PromptEditor({
 function DeleteButton({
   name,
   onConfirm,
+  description = 'The text goes with it, and nothing here keeps a copy. To stop sending a prompt without losing what it says, turn it off instead.',
 }: {
   readonly name: string;
   readonly onConfirm: () => void;
+  /** What deleting costs. The default is written for a prompt the user wrote. */
+  readonly description?: string;
 }): ReactElement {
   return (
     <AlertDialog>
@@ -518,10 +556,7 @@ function DeleteButton({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Delete “{name}”?</AlertDialogTitle>
-          <AlertDialogDescription>
-            The text goes with it, and nothing here keeps a copy. To stop sending a prompt without
-            losing what it says, turn it off instead.
-          </AlertDialogDescription>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Keep it</AlertDialogCancel>

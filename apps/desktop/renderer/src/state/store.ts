@@ -2234,6 +2234,7 @@ function seedSession(overrides: Partial<SessionState> = {}): SessionState {
     dismissedTasks: [],
     tasksRequested: false,
     filesRequested: false,
+    documentsRequested: false,
     promptHistory: [],
     handoff: 'none',
     handoffOffer: null,
@@ -3213,6 +3214,35 @@ export function closeFiles(paneId: PaneId): void {
   setPaneState(pane, { filesRequested: false });
 }
 
+/**
+ * Open the list of documents this conversation has made, bring it forward, or
+ * shut it.
+ *
+ * {@link toggleFiles}'s twin in every respect, including the absence of a
+ * guard: a conversation that has made nothing still has a list — an empty one
+ * that says so — and refusing to open it would leave the menu row looking
+ * broken on exactly the conversation where the reader wonders whether anything
+ * was made. The way in is the header's opener and the dock's own strip; the
+ * tiles in the thread are each document's own way in, and this is the index
+ * of them.
+ */
+export function toggleDocuments(pane: Pane = focusedPane()): void {
+  const tab: DockTab = { kind: 'documents', paneId: pane.id };
+  if (sameTab(useApp.getState().activeDockTab, tab)) {
+    closeDocuments(pane.id);
+    return;
+  }
+  if (!paneState(pane).documentsRequested) setPaneState(pane, { documentsRequested: true });
+  focusDockTab(tab);
+}
+
+export function closeDocuments(paneId: PaneId): void {
+  const pane = allLivePanes().find((one) => one.id === paneId);
+  if (pane === undefined) return;
+  // Which tab comes forward is `reconcileDock`'s, on this write.
+  setPaneState(pane, { documentsRequested: false });
+}
+
 export function closeTasks(paneId: PaneId): void {
   const pane = allLivePanes().find((one) => one.id === paneId);
   if (pane === undefined) return;
@@ -3692,6 +3722,7 @@ function describeShown(): readonly ShownConversation[] {
       // open on its own.
       ...(state.tasksRequested ? { tasksRequested: true } : {}),
       ...(state.filesRequested ? { filesRequested: true } : {}),
+      ...(state.documentsRequested ? { documentsRequested: true } : {}),
     };
   });
 
@@ -3710,7 +3741,8 @@ function describeShown(): readonly ShownConversation[] {
         // strip stops tracking it — which is what closing the folder browser
         // did: the flag went false, this said "nothing moved", and the tab sat
         // there with nothing behind it.
-        one.filesRequested === before.filesRequested
+        one.filesRequested === before.filesRequested &&
+        one.documentsRequested === before.documentsRequested
       );
     });
 
@@ -3772,10 +3804,11 @@ function reconcileDock(): void {
     // empty, the dock shut, and that press looking like it did nothing. The
     // condition is `visibleTabs`', which the two have to agree on exactly —
     // and the folder browser is the second tab a column can claim without
-    // anything else being in the dock, so it is in here for the same reason.
+    // anything else being in the dock, so it is in here for the same reason —
+    // as is the documents list, the third.
     !allPanes().some((pane) => {
       const one = paneState(pane);
-      if (one.filesRequested === true) return true;
+      if (one.filesRequested === true || one.documentsRequested === true) return true;
       return showsTasks(one) && (state.dockAutoOpen || one.tasksRequested);
     })
   ) {
@@ -10100,6 +10133,7 @@ export function newSession(
       dismissedTasks: [],
       tasksRequested: false,
       filesRequested: false,
+      documentsRequested: false,
       // A new conversation is exactly what a handoff was asking for, so the
       // latch comes off with everything else. Whether the account still has
       // room is a question for the next reading, not a state to inherit — and a

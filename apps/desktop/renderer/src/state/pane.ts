@@ -392,6 +392,15 @@ export interface SessionState extends MirroredState {
    * only ever be a request. Cleared at a conversation boundary with the rest.
    */
   readonly filesRequested: boolean;
+  /**
+   * Whether this column has asked for the list of documents it has made.
+   *
+   * {@link filesRequested}'s twin, and gated the same way — a request, never
+   * an arrival. The list reads the column's own transcript, so it follows
+   * whatever conversation the column is showing; cleared where the folder
+   * browser's flag is cleared, and nowhere else.
+   */
+  readonly documentsRequested: boolean;
   /** Prompts sent in this column, newest last. Renderer-local, never persisted. */
   readonly promptHistory: readonly string[];
   /**
