@@ -72,6 +72,7 @@ import { useCallback, useMemo, useRef, type KeyboardEvent, type ReactElement } f
 import {
   BotIcon,
   FileCodeIcon,
+  FilesIcon,
   FileTextIcon,
   GlobeIcon,
   LayoutGridIcon,
@@ -89,6 +90,7 @@ import {
   agentViewIsLive,
   allPanes,
   closeAgentTab,
+  closeDocuments,
   closeFile,
   closeFiles,
   closePreview,
@@ -103,6 +105,7 @@ import {
   openTerminal,
   pinFile,
   toggleBrowser,
+  toggleDocuments,
   toggleFiles,
   toggleTasks,
   toggleTerminal,
@@ -117,6 +120,7 @@ import {
   type TerminalRecord,
 } from '../state/store';
 import { AgentPane } from './AgentPane';
+import { DocumentsPane } from './DocumentsPane';
 import { FileViewer } from './FileViewer';
 import { PreviewPane } from './PreviewPane';
 import { FilesPane } from './FilesPane';
@@ -374,21 +378,28 @@ function ownerBadgeFor(
 
 
 /**
- * The six standing surfaces, in the mockup's order.
+ * The seven standing surfaces, in the mockup's order.
  *
  * 7D's strip is not a list of what exists — it is the dock saying what it
- * *can* show (docs/design/7d-full.html, `.dstrip`): six kinds, always drawn,
+ * *can* show (docs/design/7d-full.html, `.dstrip`): the kinds, always drawn,
  * the ones with something behind them lit. The app's strip used to render
  * only live tabs, which on a fresh conversation was two icons and a lot of
  * rail — the sparseness read as a different product. A kind with no instance
- * is an opener: terminal, browser, folder and delegated work can be opened
- * by pressing them; a subagent's output and a preview cannot be conjured, so
- * those two follow the disabled-with-reason rule instead of hiding.
+ * is an opener: terminal, browser, folder, the documents list and delegated
+ * work can be opened by pressing them; a subagent's output and a preview
+ * cannot be conjured, so those two follow the disabled-with-reason rule
+ * instead of hiding.
+ *
+ * The documents list sits after the folder for the strip's own reason: it is
+ * the other view of the column's *things* — what it has made, beside where it
+ * is working — and a fixed place beside the folder is one nobody's pointer
+ * has to hunt for.
  */
 const STANDING_KINDS = [
   { kind: 'terminal', label: 'Open a terminal', open: toggleTerminal },
   { kind: 'browser', label: 'Open the browser', open: toggleBrowser },
   { kind: 'files', label: 'Open the working folder', open: toggleFiles },
+  { kind: 'documents', label: 'Open the documents this conversation made', open: toggleDocuments },
   { kind: 'tasks', label: 'Open delegated work', open: toggleTasks },
   {
     kind: 'agent',
@@ -406,6 +417,7 @@ const KIND_GLYPHS: Record<(typeof STANDING_KINDS)[number]['kind'], ReactElement>
   terminal: <TerminalIcon className="size-3 shrink-0" aria-hidden="true" />,
   browser: <GlobeIcon className="size-3 shrink-0" aria-hidden="true" />,
   files: <FolderIcon className="size-3.5 shrink-0" aria-hidden="true" />,
+  documents: <FilesIcon className="size-3 shrink-0" aria-hidden="true" />,
   tasks: <UsersIcon className="size-3 shrink-0" aria-hidden="true" />,
   agent: <BotIcon className="size-3 shrink-0" aria-hidden="true" />,
   preview: <SquareArrowOutUpRightIcon className="size-3 shrink-0" aria-hidden="true" />,
@@ -451,6 +463,9 @@ function DockTabButton({
   // adding `files` to the union turned a compile error into the only warning
   // anyone got.
   if (tab.kind === 'files') return <FilesTabButton paneId={tab.paneId} active={active} ownerBadge={ownerBadge} />;
+  if (tab.kind === 'documents') {
+    return <DocumentsTabButton paneId={tab.paneId} active={active} ownerBadge={ownerBadge} />;
+  }
   return (
     <AgentTabButton paneId={tab.paneId} taskId={tab.taskId} active={active} ownerBadge={ownerBadge} />
   );
@@ -802,6 +817,35 @@ function FilesTabButton({
   );
 }
 
+/**
+ * The documents list's tab. One per column, like the folder browser's, and
+ * with the folder browser's ✕: it closes a view and drops nothing — every
+ * document is still in the thread as a tile, and the list comes back on the
+ * next press.
+ */
+function DocumentsTabButton({
+  paneId,
+  active,
+  ownerBadge,
+}: {
+  readonly paneId: string;
+  readonly active: boolean;
+  readonly ownerBadge: OwnerBadge | null;
+}): ReactElement {
+  return (
+    <TabShell
+      active={active}
+      label="Documents"
+      title="The documents this conversation made"
+      icon={<FilesIcon className="size-3 shrink-0" aria-hidden="true" />}
+      onSelect={() => focusDockTab({ kind: 'documents', paneId })}
+      onClose={() => closeDocuments(paneId)}
+      closeLabel="Close the documents list"
+      ownerBadge={ownerBadge}
+    />
+  );
+}
+
 function TasksTabButton({
   paneId,
   active,
@@ -978,6 +1022,7 @@ function DockBody({
        */}
       {active?.kind === 'file' ? <FileViewer key={active.id} id={active.id} /> : null}
       {active?.kind === 'files' ? <FilesPane paneId={active.paneId} /> : null}
+      {active?.kind === 'documents' ? <DocumentsPane paneId={active.paneId} /> : null}
       {active?.kind === 'tasks' ? <TasksPane paneId={active.paneId} /> : null}
       {/*
        * Only the active one, unlike the terminals below. An agent tab holds no
