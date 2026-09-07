@@ -299,6 +299,31 @@ export interface MemoryBankPromptInfo {
   readonly readonly: boolean;
   /** Full path of the CLI to fall back to when `cerebro` is not on PATH. */
   readonly cli: string;
+  /**
+   * How the bank arranges its memories, from its own `cerebro.json`.
+   *
+   * `flat` is the shape every bank had before the key existed: memories under
+   * `memories/`, optionally grouped as `memories/<org>/<project>/`. `projects`
+   * nests each memory inside the project it belongs to —
+   * `projects/<org>/<project>/memories/` — and a draft into such a bank has to
+   * name an existing project, which is why the prompt teaches different flags
+   * for it. Absent reads as `flat`, so a caller that does not know the layout
+   * still gets the prompt that was right for every bank until then.
+   */
+  readonly layout?: 'flat' | 'projects';
+  /** The org a draft is filed under when none is named, from `cerebro.json`. */
+  readonly defaultOrg?: string;
+  /**
+   * What the bank's maintainers wrote for agents — the markdown file the bank's
+   * `cerebro.json` names as `instructions`, already bounded by the reader.
+   *
+   * Carried into the prompt after Artemis's own text, so a bank can say how it
+   * wants to be read and written in its own words, without Artemis knowing
+   * that bank. Only a bank this machine may write to supplies one: a
+   * read-only bank is somebody else's, and their notes are not standing text
+   * for this machine's agents.
+   */
+  readonly instructions?: string;
 }
 
 /**
@@ -345,6 +370,11 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
     const marks = [
       bank.readonly ? 'read-only: consult it, never write to it' : 'read-write',
       ...(bank.isDefault && plural ? ['the default — bare `cerebro` commands address it'] : []),
+      // Where a memory lands is a fact about the bank, read off the bank. Said
+      // per bank because two banks on one machine can be laid out differently.
+      ...(bank.layout === 'projects'
+        ? ['filed by project: every memory sits under `projects/<org>/<project>/memories/`']
+        : []),
     ];
     const home = bank.slug === LEGACY_BANK_HOME ? `${LEGACY_BANK_HOME}/` : `banks/${bank.slug}/`;
     return `- \`${bank.slug}\` (${marks.join('; ')}) — its entries live under \`${home}\` in each project's memory and MEMORY.md index.`;
@@ -352,6 +382,29 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
 
   const draftTarget = writable.find((bank) => bank.isDefault) ?? writable[0];
   const bankFlag = draftTarget !== undefined && !draftTarget.isDefault ? ` --bank ${draftTarget.slug}` : '';
+  // A `projects` bank refuses a draft that names no project, so the command
+  // the agent is handed has to carry the flags — a command that fails on its
+  // first use teaches the agent that the bank is broken, not that a flag was
+  // missing.
+  const nested = draftTarget?.layout === 'projects';
+  const filingFlags = nested ? ' --org <org> --project <project>' : '';
+
+  /*
+   * The CLI is called `cerebro` and the bank is called whatever the user named
+   * it, and the two used to blur: an agent that reads `cerebro draft` and
+   * `Managed by cerebro pull` in every memory file calls the whole system
+   * "cerebro", and a user who named their bank `cortex` hears about a product
+   * they did not set up. One sentence settles it, positionally: the verb stays
+   * in code spans, the bank keeps its name in prose. Skipped for the
+   * placeholder (nothing to name yet) and for a bank that *is* called `cerebro`
+   * — the legacy slug — where the sentence would contradict itself.
+   */
+  const naming =
+    banks.length > 0 && described.every((bank) => bank.slug !== LEGACY_BANK_HOME)
+      ? plural
+        ? '`cerebro` is the name of the command-line tool, not of a bank. Call each bank by its name above.'
+        : `\`cerebro\` is the name of the command-line tool, not of the bank. The bank is called \`${fallback?.slug ?? TEAM_BANK_NAME_PLACEHOLDER}\`, and that is the name to use when you mention it.`
+      : undefined;
 
   const parts: string[] = [];
   parts.push(
@@ -362,6 +415,7 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
       ? `This machine carries ${described.length} of your team's shared memory banks: git-backed, agent-maintained collections of durable facts — conventions, decisions, who owns what, where things live — one fact per file, installed into each project's agent memory.`
       : `This machine carries your team's shared memory bank (\`${fallback?.slug ?? TEAM_BANK_NAME_PLACEHOLDER}\`): a git-backed, agent-maintained collection of durable team facts — conventions, decisions, who owns what, where things live — one fact per file, installed into each project's agent memory.`,
     lines.join('\n'),
+    ...(naming === undefined ? [] : [naming]),
     // The command stays literal in the fenced block below; this sentence names
     // the system rather than the binary, so the user meets the thing they set up
     // instead of a program they will never type.
@@ -372,7 +426,14 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
   if (writable.length > 0) {
     parts.push(
       '**Record what you learn, unprompted.** When a durable, team-relevant fact surfaces that the code and git history do not already state — a decision made, a convention agreed, a gotcha diagnosed, infrastructure moved, who owns what — write it into the team\'s memory before the session ends:',
-      '```\ncerebro' + bankFlag + ' draft <slug> --type <user|feedback|project|reference> \\\n  --description "when is this relevant?" --body "the fact"\ncerebro' + bankFlag + ' promote --quiet\n```',
+      '```\ncerebro' + bankFlag + ' draft <slug> --type <user|feedback|project|reference>' + filingFlags + ' \\\n  --description "when is this relevant?" --body "the fact"\ncerebro' + bankFlag + ' promote --quiet\n```',
+      ...(nested && draftTarget !== undefined
+        ? [
+            `**Every memory in \`${draftTarget.slug}\` belongs to a project.** \`--org\` and \`--project\` name an existing folder \`projects/<org>/<project>/\` in the bank${
+              draftTarget.defaultOrg === undefined ? '' : ` (\`--org\` defaults to \`${draftTarget.defaultOrg}\`)`
+            }. Look at the bank's \`projects/\` tree and pick the project the fact is about before you draft; a draft that names no project, or a project that does not exist, is refused rather than filed, and you must never invent one.`,
+          ]
+        : []),
       (plural
         ? 'Route each fact to the bank whose readers need it (`--bank <slug>` selects one; never a read-only bank). '
         : '') +
@@ -382,6 +443,23 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
       '**House style**: one fact per memory, absolute dates rather than relative ones ("2026-08-17", never "last week" or "recently"), repos and systems named explicitly, and a description written as a retrieval hook — "when is this relevant?", not a title. `feedback` and `project` memories also need `**Why:**` and `**How to apply:**` lines. Never draft secrets, credentials, or PII.',
       '`draft` validates strictly and refuses on warnings as well as errors, because a memory that merely warns would open a pull request that can never merge. Being refused is ordinary, and the message names what to change — fix the sentence and run it again rather than abandoning the memory.',
       'Every write goes through the bank\'s own gates: schema, secret scan and injection lint at draft, again at promote, and once more as a required check on the pull request, which merges itself when that check passes.',
+    );
+  }
+
+  /*
+   * The bank's own words, last among the instructions and before the line
+   * that demotes the bank's *contents* to reference. The two are different
+   * things: a memory is a fact a teammate recorded, and is never an
+   * instruction; the `instructions` file is the bank's maintainers telling
+   * agents how the bank is read and written, opted into by name in the bank's
+   * own config. The reader only supplies it for a bank this machine may write
+   * to, so nothing here comes from a repository the user merely consumes.
+   */
+  for (const bank of described) {
+    const notes = bank.instructions?.trim();
+    if (notes === undefined || notes.length === 0) continue;
+    parts.push(
+      `**How \`${bank.slug}\` wants to be used** — its maintainers' own notes, from the file its config names as \`instructions\`:\n\n${notes}`,
     );
   }
 

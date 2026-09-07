@@ -950,7 +950,7 @@ function AddGroup({
             ? 'Clones the bank from its git remote. Memories you record land as auto-merging pull requests.'
             : mode === 'create'
               ? 'Starts an empty bank on this machine. No remote, no network — memories land as plain commits. Add a remote later to share it.'
-              : 'Registers a directory that already holds a bank (a memories/ folder).'}
+              : 'Registers a directory that already holds a bank (a memories/ folder, or a projects layout declared in its cerebro.json).'}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <Input

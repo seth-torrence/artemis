@@ -35,6 +35,7 @@ import {
   parseRegistry,
   PYTHON_CANDIDATES,
   selectPython,
+  syncDue,
   withoutSecrets,
   type LsRemoteResult,
   type PythonProbe,
@@ -580,5 +581,31 @@ describe('parseGitOrigin', () => {
   it('is null for a repository with no origin, and for anything unreadable', () => {
     expect(parseGitOrigin('[core]\n\tbare = false\n')).toBeNull();
     expect(parseGitOrigin('')).toBeNull();
+  });
+});
+
+describe('syncDue: the per-directory throttle', () => {
+  const MINUTE = 60_000;
+
+  it('lets the first sync through, and the same directory again after a minute', () => {
+    expect(syncDue({ lastSyncAt: 0 }, '/w/app', 1)).toBe(true);
+    expect(syncDue({ lastSyncAt: 1000, lastSyncCwd: '/w/app' }, '/w/app', 1000 + MINUTE)).toBe(true);
+  });
+
+  it('skips a burst of runs in the directory it just synced', () => {
+    expect(syncDue({ lastSyncAt: 1000, lastSyncCwd: '/w/app' }, '/w/app', 1000 + MINUTE / 2)).toBe(false);
+    // A caller that names no directory is the old behaviour: throttled by time alone.
+    expect(syncDue({ lastSyncAt: 1000, lastSyncCwd: '/w/app' }, undefined, 1000 + MINUTE / 2)).toBe(false);
+  });
+
+  it('goes through for a directory the last sync did not know about', () => {
+    /*
+     * The case the time-only throttle swallowed: a second project opened
+     * within a minute of the first started without its bank installed, and
+     * stayed that way until a bank commit happened to trigger the
+     * every-project install.
+     */
+    expect(syncDue({ lastSyncAt: 1000, lastSyncCwd: '/w/app' }, '/w/other', 1000 + 5)).toBe(true);
+    expect(syncDue({ lastSyncAt: 1000 }, '/w/app', 1000 + 5)).toBe(true);
   });
 });
