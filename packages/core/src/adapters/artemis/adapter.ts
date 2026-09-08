@@ -63,6 +63,8 @@ import type {
   AgentEvent,
   ArtemisActivity,
   ArtemisPermissionNotice,
+  Attachment,
+  BackgroundTask,
   Capabilities,
   MessageId,
   PermissionDecision,
@@ -78,6 +80,7 @@ import type {
   ServerSessionMessagesBody,
   ServerSessionsBody,
   ServerSessionTaggedBody,
+  SessionDelegatedWork,
   SessionId,
   SessionSummary,
   ToolCallId,
@@ -113,6 +116,7 @@ import type {
 import { splitEvents } from '../local/stream.js';
 import { parseServerModels } from './catalogue.js';
 import { guardRemoteDecision } from './permissions.js';
+import { ServedWork } from './liveWork.js';
 import { readServerLine, type ServerStreamDelta } from './stream.js';
 
 export const ARTEMIS_PROVIDER_ID: ProviderId = 'artemis';
@@ -299,6 +303,12 @@ export interface ArtemisReconnectOptions {
   readonly backoffMs?: readonly number[];
 }
 
+/** What a run tells the adapter that outlives the run. */
+interface ArtemisRunHooks {
+  /** The stream relayed the run's delegated rows — the whole live set. */
+  readonly onTasks?: (sessionId: SessionId | undefined, tasks: readonly BackgroundTask[]) => void;
+}
+
 const DEFAULT_WATCHDOG_MS = 45_000;
 const DEFAULT_BACKOFF_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 /** How long a reconnect waits for the server's headers before trying again. */
@@ -398,11 +408,26 @@ class ArtemisRun implements Run {
   #notices = 0;
   /** Whether the "instructions set aside" notice has been said. Once per run. */
   #instructionsDropped = false;
+  /**
+   * The ids this run's caller filed its steers under, in send order.
+   *
+   * The server reports a delivery by *its* filing of the message, which this
+   * side never learns; the queue it was read from is FIFO, so the oldest
+   * unmatched id here is the one it means. See `artemis.delivered`.
+   */
+  readonly #steered: MessageId[] = [];
+  /** Where the adapter keeps what the stream said the run delegated. */
+  readonly #onTasks: ArtemisRunHooks['onTasks'];
 
-  constructor(input: ResolvedRunInput, reconnect: Required<ArtemisReconnectOptions>) {
+  constructor(
+    input: ResolvedRunInput,
+    reconnect: Required<ArtemisReconnectOptions>,
+    hooks: ArtemisRunHooks = {},
+  ) {
     this.runId = input.runId;
     this.#input = input;
     this.#reconnect = reconnect;
+    this.#onTasks = hooks.onTasks;
     void this.#drive();
   }
 
@@ -745,6 +770,27 @@ class ArtemisRun implements Run {
     // and every native run route addresses it from here on.
     if (extensions?.runId !== undefined) this.#remoteRunId = extensions.runId as RunId;
     if (extensions?.permission !== undefined) this.#notePermission(extensions.permission);
+    // The whole live set, re-stamped onto this run so the renderer files the
+    // rows under the conversation it is drawing. Remembered on the adapter
+    // too, keyed by session, so the rows outlive the turn — see
+    // `sessionsHoldingWork` on the adapter.
+    if (extensions?.tasks !== undefined) {
+      this.#emit({ type: 'background.tasks', tasks: extensions.tasks } as never);
+      this.#onTasks?.(this.#sessionId, extensions.tasks);
+    }
+    /*
+     * The server read a steered message. Its id is the server's filing, not
+     * the one this run's caller handed `send`; the caller's ids are matched
+     * in the order they were sent, because the queue they were read from is
+     * FIFO too. A delivery with nothing to match — a message steered by
+     * another client — is dropped rather than misattributed.
+     */
+    if (extensions?.delivered !== undefined) {
+      const messageId = this.#steered.shift();
+      if (messageId !== undefined) {
+        this.#emit({ type: 'message.delivered', messageId } as never);
+      }
+    }
     // The final chunk's report replaces, not appends — it is the whole list,
     // arriving once.
     if (extensions?.activity !== undefined) stream.activity = extensions.activity;
@@ -901,9 +947,16 @@ class ArtemisRun implements Run {
     return `${baseUrl(this.#input.env)}${API_PREFIX}/runs/${encodeURIComponent(runId)}/${action}`;
   }
 
-  async send(text: string): Promise<SendResult> {
+  async send(
+    text: string,
+    _attachments?: readonly Attachment[],
+    messageId?: MessageId,
+  ): Promise<SendResult> {
     const response = await this.#post(this.#runRoute('messages'), { text });
     if (!response.ok) throw await runRouteError(response, 'steer this run');
+    // Remembered only once the server has it: a refused send is not in any
+    // queue, and an id for it would steal the next delivery.
+    if (messageId !== undefined) this.#steered.push(messageId);
     const reply = (await response.json()) as Partial<RunsSendResponse>;
     // Reported, not inferred: a server that filed the text for the next turn
     // says so, and a caller told its correction landed when it did not would
@@ -1129,15 +1182,31 @@ async function fetchServerSessions(
 }
 
 export function createArtemisAdapter(
-  options: { readonly reconnect?: ArtemisReconnectOptions } = {},
+  options: { readonly reconnect?: ArtemisReconnectOptions; readonly work?: ServedWork } = {},
 ): ProviderAdapter {
   const reconnect: Required<ArtemisReconnectOptions> = {
     watchdogMs: options.reconnect?.watchdogMs ?? DEFAULT_WATCHDOG_MS,
     backoffMs: options.reconnect?.backoffMs ?? DEFAULT_BACKOFF_MS,
   };
+  /*
+   * What served conversations are still doing, for the engine's poll. Fed by
+   * every run's stream and by each known server's own ledger; see
+   * `liveWork.ts` for why both. Known servers are the ones a profile has used
+   * for a listing or a run.
+   */
+  const work = options.work ?? new ServedWork();
+  const known = (env: Readonly<Record<string, string | undefined>>): void => {
+    work.watch({ root: baseUrl(env), headers: authHeaders(env) });
+  };
   return {
     id: ARTEMIS_PROVIDER_ID,
     label: 'Artemis Server',
+
+    // The three questions the engine's poll asks — see `ProviderAdapter` —
+    // answered for served conversations from the ledger above.
+    sessionsHoldingWork: () => work.holding(),
+    sessionsWorking: () => work.working(),
+    delegatedWork: (): readonly SessionDelegatedWork[] => work.delegated(),
     credentials: artemisCredentials(),
     capabilities: ARTEMIS_CAPABILITIES,
     // Labelled levels for the thinking picker. Which of them a given route
@@ -1212,6 +1281,7 @@ export function createArtemisAdapter(
      * claim there is no history.
      */
     async listSessions(query: SessionListQuery): Promise<SessionListPage> {
+      known(query.env);
       const sessions = await fetchServerSessions(query.env, query.profileId);
       const offset = query.offset ?? 0;
       const limit = query.limit ?? sessions.length;
@@ -1354,7 +1424,12 @@ export function createArtemisAdapter(
           ),
         );
       }
-      return Promise.resolve(new ArtemisRun(input, reconnect));
+      known(input.env);
+      return Promise.resolve(
+        new ArtemisRun(input, reconnect, {
+          onTasks: (sessionId, tasks) => work.noteTasks(sessionId, tasks),
+        }),
+      );
     },
   } as ProviderAdapter;
 }

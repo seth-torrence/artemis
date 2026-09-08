@@ -31,7 +31,13 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { PlanUsage, ProfileId, ProviderId, RunId } from '@rx-artemis/protocol';
+import type {
+  PlanUsage,
+  ProfileId,
+  ProviderId,
+  RunId,
+  SessionDelegatedWork,
+} from '@rx-artemis/protocol';
 import {
   RunError,
   checkAuthStatus,
@@ -421,10 +427,46 @@ export function createHeadlessHost(dataDir: string): HeadlessHost {
       await runs.dispose(runId as RunId);
     },
 
-    // The observation surface (ADR 0004). No `liveWork`: the headless host
-    // keeps no background-work ledger, and the route's contract makes the
-    // empty answer it degrades to an honest one.
+    // The observation surface (ADR 0004).
     listRuns: async (query) => runs.list(query.cwd),
+    /*
+     * Conversations still working, the same three sets the desktop's engine
+     * answers, from the same two sources: the registry for open turns, and
+     * each adapter's own ledger for the work that outlives one — a
+     * backgrounded subagent, a workflow, a registered schedule.
+     *
+     * This used to be absent, on the reasoning that the headless host keeps
+     * no ledger of its own. It never needed one: the Claude adapter holds the
+     * ledger, exactly as it does under the desktop, and the answer was one
+     * call away. Without it a client — a remote window, or a desktop driving
+     * a served account — was told nothing was working on this machine, so a
+     * conversation with a subagent twenty minutes into its task read as
+     * finished the moment its turn ended. `delegated` is what lets that
+     * client redraw the rows after a reload or a sleep.
+     */
+    liveWork: async () => {
+      const holding = new Set<string>();
+      const working = new Set<string>();
+      for (const handle of runs.list()) {
+        if (handle.status !== 'ended' && handle.sessionId !== undefined) {
+          holding.add(String(handle.sessionId));
+          working.add(String(handle.sessionId));
+        }
+      }
+      const delegated = new Map<string, SessionDelegatedWork>();
+      for (const adapter of providers.list()) {
+        for (const sessionId of adapter.sessionsHoldingWork?.() ?? []) holding.add(String(sessionId));
+        // An adapter without the split falls back to its retention set — the
+        // conservative reading, and the desktop engine's.
+        for (const sessionId of adapter.sessionsWorking?.() ?? adapter.sessionsHoldingWork?.() ?? []) {
+          working.add(String(sessionId));
+        }
+        for (const entry of adapter.delegatedWork?.() ?? []) {
+          if (!delegated.has(String(entry.sessionId))) delegated.set(String(entry.sessionId), entry);
+        }
+      }
+      return { sessionIds: [...holding], working: [...working], delegated: [...delegated.values()] };
+    },
     getRun: async (runId) => runs.get(runId as RunId),
     runEvents: async (query) => {
       const after = query.afterSeq ?? -1;

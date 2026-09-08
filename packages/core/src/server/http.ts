@@ -2840,6 +2840,17 @@ function chunkFor(
     case 'activity':
       return undefined;
 
+    // What the run has delegated, on an empty delta: an OpenAI client appends
+    // nothing, an Artemis client redraws its rows. The whole set each time,
+    // which is the event's own contract.
+    case 'tasks':
+      return chatChunk({ ...frame, delta: {}, ...stamped({ tasks: event.tasks }) });
+
+    // A steered message was read. Same empty delta; the client clears its
+    // "queued" marker.
+    case 'delivered':
+      return chatChunk({ ...frame, delta: {}, ...stamped({ delivered: event.messageId }) });
+
     case 'done': {
       const { result } = event;
       if (result.sessionId !== undefined) hooks.record?.(result.sessionId);
