@@ -43,7 +43,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { open, realpath, stat } from 'node:fs/promises';
+import { open, readdir, realpath, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -148,7 +150,7 @@ import {
 import type { ClaudeMapperState } from './mapper.js';
 import { recoverSessionCwds } from './claudeSessionCwd.js';
 import { findScheduledSpawns } from './claudeSessionSpawn.js';
-import { replayStoredSession, resolveRewindPoint } from './history.js';
+import { mergeQueuedCommands, replayStoredSession, resolveRewindPoint } from './history.js';
 import type { RewindPoint, StoredMessage } from './history.js';
 import { readPlanUsage } from './planUsage.js';
 import { AsyncQueue, createDeferred } from './stream.js';
@@ -1632,8 +1634,24 @@ export function createClaudeAdapter(options?: ClaudeAdapterOptions): ProviderAda
       const hasMore = limit !== undefined && stored.length > limit;
       const page = hasMore ? stored.slice(0, limit) : stored;
 
+      /*
+       * The messages the person sent mid-turn, which the SDK's read leaves
+       * out: the CLI files each as a `queued_command` attachment record, not
+       * as a user turn, and `getSessionMessages` returns user and assistant
+       * records only. Read off the transcript file and merged by time. Best
+       * effort — a transcript that cannot be found replays as it always did,
+       * without them.
+       */
+      const queued = await readQueuedCommands(configDir, input.cwd, input.sessionId).catch(
+        () => [] as StoredMessage[],
+      );
+      const merged = mergeQueuedCommands(page as unknown as readonly StoredMessage[], queued, {
+        first: (input.offset ?? 0) === 0,
+        last: !hasMore,
+      });
+
       let seq = 0;
-      const events = replayStoredSession(page as unknown as readonly StoredMessage[], {
+      const events = replayStoredSession(merged, {
         runId: input.runId,
         sessionId: input.sessionId,
         ts: now(),
@@ -4748,6 +4766,87 @@ class ClaudeTurn implements Run {
 /* -------------------------------------------------------------------------- */
 /* Session listing plumbing                                                   */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Where the CLI wrote a conversation, or `undefined` when it is not there.
+ *
+ * `$CLAUDE_CONFIG_DIR/projects/<cwd with every non-alphanumeric turned into
+ * a dash>/<sessionId>.jsonl`, exactly as `#deliveryPath` resolves it for the
+ * fold watch — the CLI munges its *resolved* directory, so the real path is a
+ * candidate too. Without a directory to derive the key from, the project
+ * folders are scanned for the file: a history read is allowed to cost a
+ * `readdir`, which the fold watch's per-second poll is not.
+ */
+async function findSessionTranscript(
+  configDir: string | undefined,
+  cwd: string | undefined,
+  sessionId: string,
+): Promise<string | undefined> {
+  const root = join(configDir ?? join(homedir(), '.claude'), 'projects');
+  const isFile = (file: string): Promise<boolean> =>
+    stat(file)
+      .then((info) => info.isFile())
+      .catch(() => false);
+
+  if (cwd !== undefined) {
+    const candidates = [cwd, await realpath(cwd).catch(() => cwd)];
+    for (const dir of new Set(candidates)) {
+      const file = join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'), `${sessionId}.jsonl`);
+      if (await isFile(file)) return file;
+    }
+    return undefined;
+  }
+
+  const projects = await readdir(root).catch(() => [] as string[]);
+  for (const project of projects) {
+    const file = join(root, project, `${sessionId}.jsonl`);
+    if (await isFile(file)) return file;
+  }
+  return undefined;
+}
+
+/**
+ * The `queued_command` attachment records in a transcript, as stored messages.
+ *
+ * Read line by line rather than whole, because a long session's file is tens
+ * of megabytes and the rows wanted are a handful. Every failure — no file, a
+ * row that is not JSON — costs the rows it hides and nothing else; the caller
+ * replays without them, which is what it did before this existed.
+ */
+async function readQueuedCommands(
+  configDir: string | undefined,
+  cwd: string | undefined,
+  sessionId: string,
+): Promise<StoredMessage[]> {
+  const file = await findSessionTranscript(configDir, cwd, sessionId);
+  if (file === undefined) return [];
+
+  const out: StoredMessage[] = [];
+  const lines = createInterface({
+    input: createReadStream(file, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of lines) {
+    // Cheap pre-filter: the rows wanted name their kind in the first bytes.
+    if (!line.includes('"attachment"') || !line.includes('queued_command')) continue;
+    let row: unknown;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof row !== 'object' || row === null) continue;
+    const record = row as { type?: unknown; uuid?: unknown; attachment?: unknown; timestamp?: unknown };
+    if (record.type !== 'attachment' || typeof record.uuid !== 'string') continue;
+    out.push({
+      type: 'attachment',
+      uuid: record.uuid,
+      attachment: record.attachment,
+      ...(record.timestamp === undefined ? {} : { timestamp: record.timestamp }),
+    });
+  }
+  return out;
+}
 
 /**
  * Serialises access to `process.env.CLAUDE_CONFIG_DIR`.

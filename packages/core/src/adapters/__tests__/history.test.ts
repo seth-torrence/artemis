@@ -187,6 +187,56 @@ describe('replayStoredMessage', () => {
     expect(events).toEqual([]);
   });
 
+  it('replays a message sent mid-turn from the attachment the CLI filed it as', () => {
+    // The CLI never files a mid-turn message as a user turn. It feeds the
+    // words to the model as a `queued_command` attachment at the next tool
+    // boundary and writes that record — so a replay that read only `user`
+    // records showed a reply discussing a message that was nowhere above it,
+    // on every reopen. The row goes back where the CLI read it.
+    const events = replayStoredMessage(
+      {
+        type: 'attachment',
+        uuid: 'att-1',
+        timestamp: '2026-09-07T11:02:49.848Z',
+        attachment: {
+          type: 'queued_command',
+          prompt: 'also, add find in page',
+          source_uuid: '08197866-c398-41f7-911a-748a289355bf',
+          commandMode: 'prompt',
+          timestamp: '2026-09-07T11:02:49.848Z',
+        },
+      },
+      ctx(),
+    );
+
+    expect(events).toEqual([
+      {
+        runId: 'run_1',
+        seq: 0,
+        ts: Date.parse('2026-09-07T11:02:49.848Z'),
+        type: 'text.complete',
+        messageId: 'att-1',
+        role: 'user',
+        text: 'also, add find in page',
+        blockIndex: 0,
+        replay: true,
+      },
+    ]);
+  });
+
+  it('ignores every other kind of attachment', () => {
+    // A file the model was shown, an editor selection: the CLI files those
+    // the same way, and none of them is a person's sentence.
+    for (const attachment of [
+      { type: 'file', filename: 'notes.md', content: 'hello' },
+      { type: 'selected_lines_in_ide', filename: 'a.ts', content: 'x' },
+      { type: 'queued_command' },
+      'not even an object',
+    ]) {
+      expect(replayStoredMessage({ type: 'attachment', uuid: 'att', attachment }, ctx())).toEqual([]);
+    }
+  });
+
   it('drops the interrupt markers the CLI records when a turn is stopped', () => {
     const c = ctx();
     for (const text of ['[Request interrupted by user]', '[Request interrupted by user for tool use]']) {
