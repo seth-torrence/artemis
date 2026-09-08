@@ -1,6 +1,6 @@
 {
   "name": "@rx-artemis/desktop",
-  "version": "2.11.0",
+  "version": "2.11.1",
   "private": true,
   "description": "Artemis desktop application \u2014 Electron main, preload bridge and React renderer.",
   "author": {
