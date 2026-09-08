@@ -1,6 +1,16 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.11.1
+
+Three repairs to conversations held with an Artemis server, each reproduced against a live server before it was fixed.
+
+**A message sent mid-turn stays in the conversation.** It vanished the next time the conversation was read back — on reopening, after a reload, on every served replay — while the reply that discussed it stayed. The CLI never files such a message as a turn of yours: it feeds the words to the model at the next tool boundary and writes a record of that, which the replay never read. It reads it now, and the row goes back where the agent read it.
+
+**A wake-up prompt is answered.** A conversation whose turn had ended with a subagent still running would wake for a second, say something about the subagent, and stop; the second prompt worked. The prompt had been made the live turn on the spot, and the CLI's own turn about the task that settled ran first and was mistaken for its answer — while the prompt itself ran afterwards, unwatched. The turn now waits until the CLI says whose turn it has opened, and the CLI's own turns land where they belong.
+
+**Background work is visible, from a server too.** A session with subagents or a workflow still running read as finished the moment its turn ended, and for a served conversation nothing could say otherwise: the stream dropped the news, the server's live-work answer was empty, and the served provider told the sidebar nothing. All three carry it now. The sidebar's working marker and the delegated list cover served sessions, including after a sleep or reload, and the composer keeps a standing row above the prompt box while anything the conversation delegated is still running — "2 background tasks still running — the agent is not done yet" — with the delegated list one click away.
+
 ## What's new in 2.11.0
 
 **Find a word in the conversation — `Ctrl+F`, or `⌘F` on a Mac.** The search in the header finds sessions, files and commands; it could take you to a conversation and never to a line inside one. Now the key everyone already presses opens a find bar over the column you are reading: type a phrase, `Enter` and `Shift+Enter` walk the matches and wrap, `Escape` closes it and keeps what you typed for the next time. It searches the conversation itself rather than the part of it that happens to be on screen, which is the difference that matters in a working session: a phrase inside a burst of forty tool calls that was drawn as a single marker is counted, takes its turn in the cycle, and takes you to the marker hiding it. Matches on screen are highlighted without a single message being re-rendered.
