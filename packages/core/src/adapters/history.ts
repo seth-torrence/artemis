@@ -41,9 +41,16 @@ import { toJsonObject, toJsonValue } from './mapper.js';
 
 /** A stored message, in the shape the provider hands back. */
 export interface StoredMessage {
-  readonly type: 'user' | 'assistant' | 'system';
+  /**
+   * `attachment` is the CLI's own record of something it fed the model that
+   * nobody typed as a turn — and one kind of it is exactly something somebody
+   * typed: a message sent mid-turn. See {@link replayQueuedCommand}.
+   */
+  readonly type: 'user' | 'assistant' | 'system' | 'attachment';
   readonly uuid: string;
-  readonly message: unknown;
+  readonly message?: unknown;
+  /** The attachment body, on an `attachment` record. */
+  readonly attachment?: unknown;
   /**
    * When the provider recorded it — an ISO 8601 string in every transcript
    * seen so far, tolerated as epoch milliseconds too.
@@ -173,6 +180,14 @@ export function replayStoredMessage(
   // They were never shown live, so showing them now would be new noise.
   if (stored.type === 'system') return events;
 
+  // A message the person sent mid-turn, stored the only way the CLI stores
+  // one. Its own branch, because it has no `message` body to read blocks from.
+  if (stored.type === 'attachment') {
+    const queued = replayQueuedCommand(stored, ts, envelope);
+    if (queued !== undefined) events.push(queued);
+    return events;
+  }
+
   // The provider's own message id, so replayed blocks from one message group
   // together exactly as live ones do.
   //
@@ -247,6 +262,97 @@ export function replayStoredMessage(
   });
 
   return events;
+}
+
+/**
+ * A message sent while the agent was working, read back as the user row it was.
+ *
+ * The CLI never files a mid-turn message as a `user` turn. It queues it, and
+ * when a tool batch finishes it feeds the words to the model as a
+ * `queued_command` *attachment* — the model sees them inside the next tool
+ * result — and writes that attachment record to the transcript, with the text
+ * under `prompt`. On the live stream the adapter tails the file for exactly
+ * this record to report the delivery (see `#watchDeliveries` in `claude.ts`).
+ *
+ * Replay used to skip the record, because it is not a `user` message and has
+ * no `message` body. The effect was a conversation that read differently the
+ * second time: the reply discussed a message that was nowhere above it, on
+ * every reopen, reload and hand-off — while the live pane, which had drawn the
+ * optimistic row when the words were typed, showed it fine. This puts the row
+ * back where the CLI read it, which is where the live transcript had it too.
+ *
+ * Only `queued_command`. The CLI files other attachments — a file the model was
+ * shown, an editor selection — and none of those is a person's sentence.
+ */
+function replayQueuedCommand(
+  stored: StoredMessage,
+  ts: number,
+  envelope: () => { runId: RunId; seq: number; ts: number },
+): AgentEvent | undefined {
+  const attachment = stored.attachment;
+  if (attachment === null || typeof attachment !== 'object') return undefined;
+  const record = attachment as { readonly type?: unknown; readonly prompt?: unknown };
+  if (record.type !== 'queued_command') return undefined;
+  const text = asString(record.prompt);
+  if (text === undefined) return undefined;
+  void ts;
+  return {
+    ...envelope(),
+    type: 'text.complete',
+    messageId: stored.uuid,
+    role: 'user',
+    text,
+    blockIndex: 0,
+    replay: true,
+  };
+}
+
+/**
+ * Put the CLI's queued-command records back among the messages they sit between.
+ *
+ * The SDK's stored-session read returns `user` and `assistant` records only —
+ * an `attachment` record never comes back from it — so the caller reads those
+ * off the transcript file itself and hands them here to be merged by time,
+ * which is the one ordering both kinds of record carry. Messages are the
+ * page's, already cut to the caller's `limit` and `offset`; a record that
+ * falls outside the page's span is another page's and is left out, so a
+ * paged read never shows one twice or on the wrong page.
+ *
+ * `first` and `last` say whether the page has an edge on that side: a page
+ * that begins the session keeps every record before its first message, and
+ * one that ends it keeps every record after its last.
+ */
+export function mergeQueuedCommands(
+  messages: readonly StoredMessage[],
+  queued: readonly StoredMessage[],
+  edges: { readonly first: boolean; readonly last: boolean },
+): readonly StoredMessage[] {
+  if (queued.length === 0) return messages;
+  const at = (stored: StoredMessage): number | undefined => storedTimestamp(stored);
+  const times = messages.map(at);
+  const head = times.find((time) => time !== undefined);
+  const tail = [...times].reverse().find((time) => time !== undefined);
+
+  const out: StoredMessage[] = [];
+  const pending = [...queued]
+    .filter((record) => {
+      const time = at(record);
+      if (time === undefined) return false;
+      if (!edges.first && head !== undefined && time < head) return false;
+      if (!edges.last && tail !== undefined && time > tail) return false;
+      return true;
+    })
+    .sort((a, b) => (at(a) ?? 0) - (at(b) ?? 0));
+
+  for (const [index, message] of messages.entries()) {
+    const time = times[index];
+    while (pending.length > 0 && time !== undefined && (at(pending[0] as StoredMessage) ?? 0) <= time) {
+      out.push(pending.shift() as StoredMessage);
+    }
+    out.push(message);
+  }
+  out.push(...pending);
+  return out;
 }
 
 /**

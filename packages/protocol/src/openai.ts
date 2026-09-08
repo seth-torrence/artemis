@@ -54,6 +54,7 @@
  * that is the permanent answer rather than a to-do.
  */
 
+import type { BackgroundTask } from './events.js';
 import type { PermissionRequest } from './permissions.js';
 
 /* -------------------------------------------------------------------------- */
@@ -336,6 +337,25 @@ export interface ArtemisResponseExtensions {
   readonly activity?: readonly ArtemisActivity[];
   /** A prompt the run is parked on, or the news that it no longer is. */
   readonly permission?: ArtemisPermissionNotice;
+  /**
+   * What the run has delegated — subagents, workflows, backgrounded commands —
+   * as the provider reports it: the whole live set, replacing the last.
+   *
+   * The reply an OpenAI client reads is unaffected; this rides an empty-delta
+   * chunk in the namespace. It exists because a served conversation is
+   * routinely still working after its turn has ended, and a client with no
+   * word of that showed the conversation as finished while a subagent ran on
+   * for another twenty minutes. See `BackgroundTasksEvent` for the shape.
+   */
+  readonly tasks?: readonly BackgroundTask[];
+  /**
+   * The serving run has read a message that was sent into it mid-turn.
+   *
+   * The id is the *server's* filing of the message, which the client did not
+   * choose; a client that steered several times matches deliveries to its own
+   * ids in order, because the queue they were read from is in order too.
+   */
+  readonly delivered?: string;
   /** The true reason the run ended, when `finish_reason` had to flatten it. */
   readonly endReason?: string;
   /**

@@ -13,7 +13,12 @@
  * `error` object, which is the server saying the generation failed.
  */
 
-import type { ArtemisActivity, ArtemisPermissionNotice, PermissionRequest } from '@rx-artemis/protocol';
+import type {
+  ArtemisActivity,
+  ArtemisPermissionNotice,
+  BackgroundTask,
+  PermissionRequest,
+} from '@rx-artemis/protocol';
 
 /** The Artemis namespace, as much of it as a chunk carried. */
 export interface ServerExtensionsDelta {
@@ -53,6 +58,14 @@ export interface ServerExtensionsDelta {
    * wire.
    */
   readonly permission?: ArtemisPermissionNotice;
+  /**
+   * The run's delegated work, the whole live set, when a chunk carried it.
+   * Passed through as the protocol's own rows: each becomes a
+   * `background.tasks` event the renderer draws from.
+   */
+  readonly tasks?: readonly BackgroundTask[];
+  /** The server read a message steered into the run, by the server's id. */
+  readonly delivered?: string;
   /**
    * Why the run failed, when {@link endReason} is `error`.
    *
@@ -160,6 +173,21 @@ function readExtensions(value: unknown): ServerExtensionsDelta | undefined {
 
   const permission = readPermissionNotice(record['permission']);
   if (permission !== undefined) out.permission = permission;
+
+  // Rows are validated down to the two fields a renderer cannot draw without
+  // and passed through otherwise: they are the protocol's own shape, and a
+  // second, staler copy of it here would drop every field added upstream.
+  const tasks = record['tasks'];
+  if (Array.isArray(tasks)) {
+    out.tasks = tasks.filter(
+      (task): task is BackgroundTask =>
+        asRecord(task) !== undefined &&
+        asString((task as { id?: unknown }).id) !== undefined &&
+        asString((task as { status?: unknown }).status) !== undefined,
+    );
+  }
+  const delivered = asString(record['delivered']);
+  if (delivered !== undefined) out.delivered = delivered;
 
   const activity = record['activity'];
   if (Array.isArray(activity)) {

@@ -43,7 +43,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { open, realpath, stat } from 'node:fs/promises';
+import { open, readdir, realpath, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -148,7 +150,7 @@ import {
 import type { ClaudeMapperState } from './mapper.js';
 import { recoverSessionCwds } from './claudeSessionCwd.js';
 import { findScheduledSpawns } from './claudeSessionSpawn.js';
-import { replayStoredSession, resolveRewindPoint } from './history.js';
+import { mergeQueuedCommands, replayStoredSession, resolveRewindPoint } from './history.js';
 import type { RewindPoint, StoredMessage } from './history.js';
 import { readPlanUsage } from './planUsage.js';
 import { AsyncQueue, createDeferred } from './stream.js';
@@ -1632,8 +1634,24 @@ export function createClaudeAdapter(options?: ClaudeAdapterOptions): ProviderAda
       const hasMore = limit !== undefined && stored.length > limit;
       const page = hasMore ? stored.slice(0, limit) : stored;
 
+      /*
+       * The messages the person sent mid-turn, which the SDK's read leaves
+       * out: the CLI files each as a `queued_command` attachment record, not
+       * as a user turn, and `getSessionMessages` returns user and assistant
+       * records only. Read off the transcript file and merged by time. Best
+       * effort — a transcript that cannot be found replays as it always did,
+       * without them.
+       */
+      const queued = await readQueuedCommands(configDir, input.cwd, input.sessionId).catch(
+        () => [] as StoredMessage[],
+      );
+      const merged = mergeQueuedCommands(page as unknown as readonly StoredMessage[], queued, {
+        first: (input.offset ?? 0) === 0,
+        last: !hasMore,
+      });
+
       let seq = 0;
-      const events = replayStoredSession(page as unknown as readonly StoredMessage[], {
+      const events = replayStoredSession(merged, {
         runId: input.runId,
         sessionId: input.sessionId,
         ts: now(),
@@ -2561,6 +2579,21 @@ function turnSettings(input: ResolvedRunInput): TurnSettings {
   };
 }
 
+/** A turn built and not yet served. See `ClaudeProcess.#prepareTurn`. */
+interface PreparedTurn {
+  readonly state: ClaudeMapperState;
+  readonly events: AsyncQueue<AgentEvent>;
+  readonly turn: ClaudeTurn;
+}
+
+/** A prepared turn whose prompt is queued at the CLI. See `ClaudeProcess.#pendingTurn`. */
+interface PendingTurn extends PreparedTurn {
+  /** The uuid the prompt was stamped with, which its echo carries back. */
+  readonly uuid: string;
+  /** The prompt's words, the fallback for an echo minted under another id. */
+  readonly text: string;
+}
+
 /**
  * The provider process, and the turns it serves.
  * ----------------------------------------------------------------------------
@@ -2674,6 +2707,32 @@ class ClaudeProcess {
   #queuedTurnTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
+   * A turn opened by {@link continueWith} whose prompt the CLI has not started.
+   *
+   * A prompt handed to a live process used to become the active turn on the
+   * spot, and every message the CLI sent next was mapped onto it — including
+   * the turn the CLI runs *of its own accord* first. A process is kept alive
+   * past its turn precisely when it holds background work, and when that work
+   * settles the CLI queues a task notification and answers it as a turn of its
+   * own: `init`, the notification in a user slot, a sentence about the task,
+   * `result`. With a prompt pushed a moment before, that sentence streamed as
+   * the answer to the prompt and the `result` ended the run — and the prompt
+   * itself ran afterwards, on a turn nobody was watching. From the user's side:
+   * the conversation woke for a second, said something about a subagent, and
+   * stopped; the second message worked (reproduced 2026-09-08 on a served
+   * session, and the same code serves a desktop one).
+   *
+   * So the turn is held here until the CLI says whose turn it has opened, which
+   * it does with the user message it echoes: ours carries the uuid the prompt
+   * was stamped with (or its words), the harness's carries a notification. The
+   * messages of a turn whose owner is not yet known wait in {@link #undecided};
+   * see {@link #defer} for the decision and where each side's messages go.
+   */
+  #pendingTurn: PendingTurn | undefined;
+  /** Messages of a CLI turn whose owner is not yet known. See {@link #pendingTurn}. */
+  readonly #undecided: SDKMessage[] = [];
+
+  /**
    * Messages pushed at the CLI that it has not been seen to read yet.
    *
    * In send order, which is delivery order — the CLI's queue is FIFO — and keyed
@@ -2777,6 +2836,13 @@ class ClaudeProcess {
    * streaming mode.
    */
   beginTurn(input: ResolvedRunInput): ClaudeTurn {
+    const prepared = this.#prepareTurn(input);
+    this.#install(prepared);
+    return prepared.turn;
+  }
+
+  /** Build a turn's state and stream without making it the one being served. */
+  #prepareTurn(input: ResolvedRunInput): PreparedTurn {
     const state = createClaudeMapperState(input.runId, {
       now: this.#deps.now,
       resumedFrom: input.resumeSessionId,
@@ -2792,14 +2858,28 @@ class ClaudeProcess {
       },
     });
 
-    this.#state = state;
-    this.#eventQueue = events;
-    return new ClaudeTurn(this, state, events);
+    return { state, events, turn: new ClaudeTurn(this, state, events) };
+  }
+
+  /** Make a prepared turn the one the pump maps onto. */
+  #install(turn: PreparedTurn): void {
+    this.#state = turn.state;
+    this.#eventQueue = turn.events;
   }
 
   /** Is this the turn the process is serving right now? */
   isActive(state: ClaudeMapperState): boolean {
     return this.#state === state;
+  }
+
+  /**
+   * Is this turn one the process will still carry — being served, or waiting
+   * for the CLI to open it? What a steer typed straight after a prompt needs
+   * to know: the prompt is queued and the steer queues behind it, exactly as
+   * it would had the CLI already begun.
+   */
+  isOpen(state: ClaudeMapperState): boolean {
+    return this.#state === state || this.#pendingTurn?.state === state;
   }
 
   /**
@@ -3037,6 +3117,10 @@ class ClaudeProcess {
     // caller down the fresh-spawn path with `--resume`, which is safe: the
     // provider serialises the two CLIs on its own transcript.
     if (!this.#state.ended) return false;
+    // A prompt is already queued and waiting for the CLI to open its turn. A
+    // second one behind it would be answered in an order nobody can predict;
+    // the fresh-spawn path serialises the two on the provider's transcript.
+    if (this.#pendingTurn !== undefined) return false;
     if (input.forkSession === true) return false;
     /*
      * `bypassPermissions` needs an opt-in this process may not have.
@@ -3081,7 +3165,7 @@ class ClaudeProcess {
    * the old one.
    */
   async continueWith(input: ResolvedRunInput): Promise<ClaudeTurn> {
-    const turn = this.beginTurn(input);
+    const prepared = this.#prepareTurn(input);
     await this.#applySettings(turnSettings(input));
     const staged = await this.#stage(input.attachments);
     /*
@@ -3099,8 +3183,16 @@ class ClaudeProcess {
         'The process serving this conversation closed while the turn was being prepared. Send again to start fresh.',
       );
     }
-    this.#promptQueue.push(this.#userMessage(input.prompt, input.attachments, staged));
-    return turn;
+    /*
+     * Not installed as the active turn yet — see {@link #pendingTurn}. The
+     * uuid is what lets the CLI's echo be recognised as this prompt rather
+     * than as a turn the CLI started for itself; the words are the fallback,
+     * as they are for a steer.
+     */
+    const uuid = randomUUID();
+    this.#pendingTurn = { ...prepared, uuid, text: input.prompt };
+    this.#promptQueue.push(this.#userMessage(input.prompt, input.attachments, staged, uuid));
+    return prepared.turn;
   }
 
   /**
@@ -3313,7 +3405,12 @@ class ClaudeProcess {
       this.#awaitingSuggestion = false;
       // Nothing came. Release the way the settle grace does — unless a queued
       // turn is still owed, whose own timer will do this.
-      if (this.#state.ended && !this.#holdsWork() && !this.#awaitingQueuedTurn) {
+      if (
+        this.#state.ended &&
+        this.#pendingTurn === undefined &&
+        !this.#holdsWork() &&
+        !this.#awaitingQueuedTurn
+      ) {
         this.#deps.diagnostic?.(
           `Run ${this.runId}: no predicted prompt arrived; releasing the process.`,
         );
@@ -3403,7 +3500,12 @@ class ClaudeProcess {
       this.#unread.length = 0;
       // Nothing came — the steer was consumed by the fold. Release the way the
       // settle grace does, unless another hold is still on.
-      if (this.#state.ended && !this.#holdsWork() && !this.#awaitingSuggestion) {
+      if (
+        this.#state.ended &&
+        this.#pendingTurn === undefined &&
+        !this.#holdsWork() &&
+        !this.#awaitingSuggestion
+      ) {
         this.#deps.diagnostic?.(
           `Run ${this.runId}: no queued turn arrived; the steer folded in. Releasing the process.`,
         );
@@ -3430,6 +3532,7 @@ class ClaudeProcess {
       // timers will do this.
       if (
         this.#state.ended &&
+        this.#pendingTurn === undefined &&
         !this.#holdsWork() &&
         !this.#awaitingSuggestion &&
         !this.#awaitingQueuedTurn
@@ -3583,7 +3686,10 @@ class ClaudeProcess {
     attachments?: readonly Attachment[],
     messageId?: MessageId,
   ): Promise<SendResult> {
-    if (this.#state.ended) {
+    // A turn waiting for the CLI to open it is live for this purpose: the
+    // steer queues behind its prompt, as it would had the CLI already begun.
+    // See `#pendingTurn`.
+    if (this.#state.ended && this.#pendingTurn === undefined) {
       throw adapterError(
         'invalid_request',
         `Run ${this.runId} has already ended; start a new run with resumeSessionId to continue.`,
@@ -4103,7 +4209,206 @@ class ClaudeProcess {
     //    one `run.end`, and a stream that terminates.
     this.#finalize('disposed');
     this.#eventQueue.close();
+    this.#abandonPending('disposed');
     this.#denyAllPending(DISPOSED_DENY_MESSAGE);
+  }
+
+  /**
+   * Whose turn is the CLI on? Decide from the messages, then route them.
+   *
+   * While {@link #pendingTurn} is set and the served turn has ended, every
+   * message is held in {@link #undecided} until one says who the turn belongs
+   * to: a user message that is the pending prompt's echo — its uuid, or its
+   * words — means the CLI has opened *our* turn, which is installed and given
+   * the held messages in order; any other user message, or a `result` before
+   * one, means the CLI is running a turn of its own first, which becomes a
+   * continuation exactly as it would have had nothing been waiting, and our
+   * prompt stays queued behind it for the next decision.
+   *
+   * `'pass'` when nothing is pending: the caller handles the message itself.
+   */
+  #defer(message: SDKMessage): 'pass' | 'deferred' | 'handled' | 'exit' {
+    const pending = this.#pendingTurn;
+    if (pending === undefined || !this.#state.ended) return 'pass';
+
+    if (message.type === 'user') {
+      const echo = message as SDKUserMessage;
+      const mine =
+        echo.uuid === pending.uuid ||
+        (pending.text !== '' && echoedText(echo).includes(pending.text));
+      return this.#decide(mine ? 'mine' : 'foreign', message);
+    }
+    /*
+     * A turn that ended without echoing any user message is read as ours.
+     *
+     * The CLI echoes every user turn it opens — the prompt, or the harness's
+     * own notification — so a turn with no echo at all is one the SDK's
+     * wire has simply not narrated, and the only honest attribution is the
+     * one every turn had before this decision existed: the prompt that was
+     * queued. Reading it as foreign instead would strand the prompt on a
+     * turn that never opens.
+     */
+    if (message.type === 'result') return this.#decide('mine', message);
+
+    this.#undecided.push(message);
+    return 'deferred';
+  }
+
+  #decide(owner: 'mine' | 'foreign', message: SDKMessage): 'handled' | 'exit' {
+    const pending = this.#pendingTurn as PendingTurn;
+    if (owner === 'mine') {
+      this.#pendingTurn = undefined;
+      this.#install(pending);
+      this.#deps.diagnostic?.(`Run ${pending.state.runId}: the CLI opened the turn for its prompt.`);
+    } else {
+      this.#deps.diagnostic?.(
+        `Run ${pending.state.runId}: the CLI is running a turn of its own first; the prompt stays queued behind it.`,
+      );
+      // Nobody to report the CLI's own turn to: its messages are dropped, as
+      // the pump drops any events that have no turn. Ours is still waiting.
+      if (!this.#ensureTurn()) {
+        this.#undecided.length = 0;
+        return 'handled';
+      }
+    }
+
+    const batch = [...this.#undecided.splice(0), message];
+    let exit = false;
+    for (const one of batch) {
+      if (this.#handle(one)) exit = true;
+    }
+    return exit ? 'exit' : 'handled';
+  }
+
+  /**
+   * One provider message, onto the turn being served.
+   *
+   * The body of the pump's loop, and the reason it is a method: a message
+   * whose turn was not known when it arrived is handled later, from
+   * {@link #decide}, by exactly this. Returns whether the pump should leave
+   * its loop — the turn ended and nothing holds the process.
+   */
+  #handle(message: SDKMessage): boolean {
+    /*
+     * Before mapping, and deliberately not from the mapped events.
+     *
+     * `mapSdkMessage` returns nothing once a turn's state is `ended` — it is
+     * a per-turn mapper and that is the right rule for a transcript. But the
+     * message that releases this process arrives *after* a turn has ended, by
+     * definition: it is the provider saying the work that outlived the turn
+     * has finished. Reading retention off the mapped stream meant never
+     * seeing it, and a process kept alive for work that had already settled.
+     */
+    this.#observeMessage(message);
+
+    // An `init` after the last turn ended is the provider starting one of its
+    // own — it emits one per turn in streaming mode, which is what makes this
+    // detectable at all. Before mapping, so the `init` itself lands on the new
+    // turn and becomes its `session.started` rather than being dropped by a
+    // mapper that is finished with the old state.
+    if (startsTurn(message)) this.#ensureTurn();
+
+    /*
+     * After `#ensureTurn`, so a steer the CLI parked and is now running as
+     * a turn of its own reports its delivery on *that* turn's stream rather
+     * than on the closed state of the one it was typed into. Before the
+     * mapping below, so "your message was read" arrives ahead of the work
+     * the agent did about it.
+     */
+    for (const event of this.#observeDelivery(message)) this.#emit(event);
+
+    let events: readonly AgentEvent[] = [];
+    try {
+      events = mapSdkMessage(message, this.#state);
+    } catch (error) {
+      // A mapping bug must degrade to a missing event, never to a dead
+      // transcript. The run keeps going.
+      this.#deps.diagnostic?.(
+        `Run ${this.runId}: failed to map a provider message.`,
+        describe(error),
+      );
+    }
+
+    for (const event of events) {
+      // A schedule is only ever visible as the call that registered it, and
+      // a call only happens inside a turn — so this one is read off the
+      // mapped stream, where the tool's name has already been dug out of the
+      // assistant message's content blocks.
+      if (event.type === 'tool.start') this.#observeToolCall(event.name);
+      this.#emit(event);
+    }
+
+    // After the turn's own events, so a row set describing what a tool call
+    // just launched arrives after the call that launched it.
+    this.#flushTasks();
+
+    // Announced from here rather than from `beginTurn`, because this is where
+    // it becomes true: the id arrives on the turn's own `init`, and for a
+    // fresh conversation the CLI is what mints it. Once, on the first turn to
+    // learn it — every later turn on this process reports the same one.
+    if (this.#sessionId === undefined && this.#state.sessionId !== undefined) {
+      this.#sessionId = this.#state.sessionId;
+      this.#deps.onSession?.(this.#state.sessionId, this);
+    }
+
+    /*
+     * The turn is over. Whether the *process* is over is a different
+     * question, and this is where the two used to be the same one.
+     *
+     * Leaving the loop closes the transport in the `finally` below, which is
+     * right when nothing is left running and wrong when something is: the
+     * `Agent` tool backgrounds by default and `Workflow` is always async, so
+     * work routinely outlives the turn that launched it and used to be
+     * killed here. Staying in the loop keeps the process, its subagents and
+     * its scheduled jobs alive, and leaves the pump reading a stream that
+     * still has things to say — the provider takes a turn of its own when a
+     * task settles.
+     *
+     * The turn itself ended properly either way: `run.end` was emitted above
+     * and its queue is closed, so a caller's `for await` has already
+     * finished. What continues is the process, with no active turn until
+     * something opens one.
+     */
+    if (this.#state.ended) {
+      // A successful ending is the one kind the provider predicts after —
+      // it skips errors and interruptions itself, so waiting on those
+      // would hold a process for a message that is not coming.
+      if (message.type === 'result' && message.subtype === 'success' && !message.is_error) {
+        this.#awaitSuggestion();
+      }
+      /*
+       * Steers the turn never folded in are parked in the CLI's queue as
+       * the next turn, and this boundary is the moment that used to
+       * destroy them: leaving the loop closes the transport in the
+       * `finally`, queue and all. Held for every ending kind — an
+       * interrupt is exactly how "stop and read my message" is said, and
+       * the queue survives it by design.
+       *
+       * Three sources, because no one of them sees the whole picture. The
+       * count is what this adapter pushed. A send in flight is a message
+       * the user has already been told was accepted but that is still
+       * being staged — see {@link send}. And the interrupt receipt is the
+       * provider's own promise to run something, which is the only
+       * evidence there is for a message the CLI queued for itself.
+       */
+      if (this.#pendingSteers > 0 || this.#sendsInFlight > 0 || this.#providerQueued) {
+        this.#awaitQueuedTurn();
+      }
+      if (
+        this.#pendingTurn === undefined &&
+        !this.#holdsWork() &&
+        !this.#awaitingSuggestion &&
+        !this.#awaitingQueuedTurn
+      ) {
+        return true;
+      }
+      if (this.#holdsWork()) {
+        this.#deps.diagnostic?.(
+          `Run ${this.runId}: turn ended with ${this.#describeHeld()} still live; keeping the process.`,
+        );
+      }
+    }
+    return false;
   }
 
   async #pump(sdkQuery: Query): Promise<void> {
@@ -4118,124 +4423,24 @@ class ClaudeProcess {
          */
         if (message.type === 'prompt_suggestion') {
           this.#deliverSuggestion(message.suggestion);
-          if (this.#state.ended && !this.#holdsWork() && !this.#awaitingQueuedTurn) break;
+          if (
+            this.#state.ended &&
+            this.#pendingTurn === undefined &&
+            !this.#holdsWork() &&
+            !this.#awaitingQueuedTurn
+          ) {
+            break;
+          }
           continue;
         }
 
-        /*
-         * Before mapping, and deliberately not from the mapped events.
-         *
-         * `mapSdkMessage` returns nothing once a turn's state is `ended` — it is
-         * a per-turn mapper and that is the right rule for a transcript. But the
-         * message that releases this process arrives *after* a turn has ended, by
-         * definition: it is the provider saying the work that outlived the turn
-         * has finished. Reading retention off the mapped stream meant never
-         * seeing it, and a process kept alive for work that had already settled.
-         */
-        this.#observeMessage(message);
+        // A turn is waiting for the CLI to say it has begun. Until it does,
+        // nothing can be mapped, because nothing is known to be its.
+        const verdict = this.#defer(message);
+        if (verdict === 'deferred' || verdict === 'handled') continue;
+        if (verdict === 'exit') break;
 
-        // An `init` after the last turn ended is the provider starting one of its
-        // own — it emits one per turn in streaming mode, which is what makes this
-        // detectable at all. Before mapping, so the `init` itself lands on the new
-        // turn and becomes its `session.started` rather than being dropped by a
-        // mapper that is finished with the old state.
-        if (startsTurn(message)) this.#ensureTurn();
-
-        /*
-         * After `#ensureTurn`, so a steer the CLI parked and is now running as
-         * a turn of its own reports its delivery on *that* turn's stream rather
-         * than on the closed state of the one it was typed into. Before the
-         * mapping below, so "your message was read" arrives ahead of the work
-         * the agent did about it.
-         */
-        for (const event of this.#observeDelivery(message)) this.#emit(event);
-
-        let events: readonly AgentEvent[] = [];
-        try {
-          events = mapSdkMessage(message, this.#state);
-        } catch (error) {
-          // A mapping bug must degrade to a missing event, never to a dead
-          // transcript. The run keeps going.
-          this.#deps.diagnostic?.(
-            `Run ${this.runId}: failed to map a provider message.`,
-            describe(error),
-          );
-        }
-
-        for (const event of events) {
-          // A schedule is only ever visible as the call that registered it, and
-          // a call only happens inside a turn — so this one is read off the
-          // mapped stream, where the tool's name has already been dug out of the
-          // assistant message's content blocks.
-          if (event.type === 'tool.start') this.#observeToolCall(event.name);
-          this.#emit(event);
-        }
-
-        // After the turn's own events, so a row set describing what a tool call
-        // just launched arrives after the call that launched it.
-        this.#flushTasks();
-
-        // Announced from here rather than from `beginTurn`, because this is where
-        // it becomes true: the id arrives on the turn's own `init`, and for a
-        // fresh conversation the CLI is what mints it. Once, on the first turn to
-        // learn it — every later turn on this process reports the same one.
-        if (this.#sessionId === undefined && this.#state.sessionId !== undefined) {
-          this.#sessionId = this.#state.sessionId;
-          this.#deps.onSession?.(this.#state.sessionId, this);
-        }
-
-        /*
-         * The turn is over. Whether the *process* is over is a different
-         * question, and this is where the two used to be the same one.
-         *
-         * Leaving the loop closes the transport in the `finally` below, which is
-         * right when nothing is left running and wrong when something is: the
-         * `Agent` tool backgrounds by default and `Workflow` is always async, so
-         * work routinely outlives the turn that launched it and used to be
-         * killed here. Staying in the loop keeps the process, its subagents and
-         * its scheduled jobs alive, and leaves the pump reading a stream that
-         * still has things to say — the provider takes a turn of its own when a
-         * task settles.
-         *
-         * The turn itself ended properly either way: `run.end` was emitted above
-         * and its queue is closed, so a caller's `for await` has already
-         * finished. What continues is the process, with no active turn until
-         * something opens one.
-         */
-        if (this.#state.ended) {
-          // A successful ending is the one kind the provider predicts after —
-          // it skips errors and interruptions itself, so waiting on those
-          // would hold a process for a message that is not coming.
-          if (message.type === 'result' && message.subtype === 'success' && !message.is_error) {
-            this.#awaitSuggestion();
-          }
-          /*
-           * Steers the turn never folded in are parked in the CLI's queue as
-           * the next turn, and this boundary is the moment that used to
-           * destroy them: leaving the loop closes the transport in the
-           * `finally`, queue and all. Held for every ending kind — an
-           * interrupt is exactly how "stop and read my message" is said, and
-           * the queue survives it by design.
-           *
-           * Three sources, because no one of them sees the whole picture. The
-           * count is what this adapter pushed. A send in flight is a message
-           * the user has already been told was accepted but that is still
-           * being staged — see {@link send}. And the interrupt receipt is the
-           * provider's own promise to run something, which is the only
-           * evidence there is for a message the CLI queued for itself.
-           */
-          if (this.#pendingSteers > 0 || this.#sendsInFlight > 0 || this.#providerQueued) {
-            this.#awaitQueuedTurn();
-          }
-          if (!this.#holdsWork() && !this.#awaitingSuggestion && !this.#awaitingQueuedTurn) {
-            break;
-          }
-          if (this.#holdsWork()) {
-            this.#deps.diagnostic?.(
-              `Run ${this.runId}: turn ended with ${this.#describeHeld()} still live; keeping the process.`,
-            );
-          }
-        }
+        if (this.#handle(message)) break;
       }
 
       if (!this.#state.ended) {
@@ -4257,6 +4462,7 @@ class ClaudeProcess {
       // transport is on its way down, or the next message attaches to a CLI that
       // is about to stop reading it and waits for a turn that never starts.
       this.#closed = true;
+      this.#abandonPending();
       this.#settling = false;
       clearTimeout(this.#settleTimer);
       this.#awaitingSuggestion = false;
@@ -4365,6 +4571,34 @@ class ClaudeProcess {
 
   #finalize(reason: RunEndReason, error?: AgentError): void {
     for (const event of finalizeRun(this.#state, reason, { error })) this.#emit(event);
+  }
+
+  /**
+   * End a turn the CLI never opened.
+   *
+   * The process is going — its transport closed, or it was disposed — with a
+   * prompt still queued for a turn that will now never start. The turn's
+   * consumer is waiting on its stream, and the contract is one `run.end` and
+   * a stream that terminates; the caller's cure is the one `continueWith`
+   * names for the same window.
+   */
+  #abandonPending(reason: RunEndReason = 'error'): void {
+    const pending = this.#pendingTurn;
+    if (pending === undefined) return;
+    this.#pendingTurn = undefined;
+    this.#undecided.length = 0;
+    this.#install(pending);
+    this.#finalize(
+      reason,
+      reason === 'error'
+        ? {
+            code: 'transport',
+            message:
+              'The process serving this conversation closed before it could start this turn. Send again to start fresh.',
+          }
+        : undefined,
+    );
+    this.#eventQueue.close();
   }
 
   #emit(event: AgentEvent): void {
@@ -4735,7 +4969,7 @@ class ClaudeTurn implements Run {
    * stranding it, and a detail-less refusal used to read as a real failure.
    */
   #requireActive(): void {
-    if (this.#state.ended || !this.#process.isActive(this.#state)) {
+    if (this.#state.ended || !this.#process.isOpen(this.#state)) {
       throw adapterError(
         'invalid_request',
         `Run ${this.runId} has already ended; start a new run with resumeSessionId to continue.`,
@@ -4748,6 +4982,87 @@ class ClaudeTurn implements Run {
 /* -------------------------------------------------------------------------- */
 /* Session listing plumbing                                                   */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Where the CLI wrote a conversation, or `undefined` when it is not there.
+ *
+ * `$CLAUDE_CONFIG_DIR/projects/<cwd with every non-alphanumeric turned into
+ * a dash>/<sessionId>.jsonl`, exactly as `#deliveryPath` resolves it for the
+ * fold watch — the CLI munges its *resolved* directory, so the real path is a
+ * candidate too. Without a directory to derive the key from, the project
+ * folders are scanned for the file: a history read is allowed to cost a
+ * `readdir`, which the fold watch's per-second poll is not.
+ */
+async function findSessionTranscript(
+  configDir: string | undefined,
+  cwd: string | undefined,
+  sessionId: string,
+): Promise<string | undefined> {
+  const root = join(configDir ?? join(homedir(), '.claude'), 'projects');
+  const isFile = (file: string): Promise<boolean> =>
+    stat(file)
+      .then((info) => info.isFile())
+      .catch(() => false);
+
+  if (cwd !== undefined) {
+    const candidates = [cwd, await realpath(cwd).catch(() => cwd)];
+    for (const dir of new Set(candidates)) {
+      const file = join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'), `${sessionId}.jsonl`);
+      if (await isFile(file)) return file;
+    }
+    return undefined;
+  }
+
+  const projects = await readdir(root).catch(() => [] as string[]);
+  for (const project of projects) {
+    const file = join(root, project, `${sessionId}.jsonl`);
+    if (await isFile(file)) return file;
+  }
+  return undefined;
+}
+
+/**
+ * The `queued_command` attachment records in a transcript, as stored messages.
+ *
+ * Read line by line rather than whole, because a long session's file is tens
+ * of megabytes and the rows wanted are a handful. Every failure — no file, a
+ * row that is not JSON — costs the rows it hides and nothing else; the caller
+ * replays without them, which is what it did before this existed.
+ */
+async function readQueuedCommands(
+  configDir: string | undefined,
+  cwd: string | undefined,
+  sessionId: string,
+): Promise<StoredMessage[]> {
+  const file = await findSessionTranscript(configDir, cwd, sessionId);
+  if (file === undefined) return [];
+
+  const out: StoredMessage[] = [];
+  const lines = createInterface({
+    input: createReadStream(file, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of lines) {
+    // Cheap pre-filter: the rows wanted name their kind in the first bytes.
+    if (!line.includes('"attachment"') || !line.includes('queued_command')) continue;
+    let row: unknown;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof row !== 'object' || row === null) continue;
+    const record = row as { type?: unknown; uuid?: unknown; attachment?: unknown; timestamp?: unknown };
+    if (record.type !== 'attachment' || typeof record.uuid !== 'string') continue;
+    out.push({
+      type: 'attachment',
+      uuid: record.uuid,
+      attachment: record.attachment,
+      ...(record.timestamp === undefined ? {} : { timestamp: record.timestamp }),
+    });
+  }
+  return out;
+}
 
 /**
  * Serialises access to `process.env.CLAUDE_CONFIG_DIR`.

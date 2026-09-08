@@ -78,6 +78,7 @@ import type {
   OpenAiChatRequest,
   OpenAiChatResponse,
   OpenAiFinishReason,
+  BackgroundTask,
   OpenAiUsage,
   PermissionDecision,
   RunEndReason,
@@ -443,6 +444,26 @@ type TurnEventBody =
       readonly afterSeq: number;
       readonly firstSeq: number;
     }
+  | {
+      /**
+       * The run's delegated work — the whole live set, as `background.tasks`
+       * carries it. Relayed rather than dropped because it is the only word a
+       * remote client has that a served conversation is still working after
+       * its turn ended: without it, a subagent twenty minutes into its task
+       * looked, from the laptop, like a conversation that had finished.
+       */
+      readonly kind: 'tasks';
+      readonly tasks: readonly BackgroundTask[];
+    }
+  | {
+      /**
+       * The provider read a message that was steered into the run. The id is
+       * the server's own filing of it; the client that sent it matches in
+       * order.
+       */
+      readonly kind: 'delivered';
+      readonly messageId: string;
+    }
   | { readonly kind: 'done'; readonly result: TurnResult };
 
 /**
@@ -670,6 +691,14 @@ class TurnTranslator {
         this.usage = toOpenAiUsage(event.usage.tokens);
         break;
 
+      case 'background.tasks':
+        out.push({ kind: 'tasks', tasks: event.tasks, seq });
+        break;
+
+      case 'message.delivered':
+        out.push({ kind: 'delivered', messageId: String(event.messageId), seq });
+        break;
+
       case 'run.end': {
         if (event.sessionId !== undefined) this.sessionId = String(event.sessionId);
         if (event.usage !== undefined) this.usage = toOpenAiUsage(event.usage.tokens);
@@ -694,11 +723,12 @@ class TurnTranslator {
       }
 
       default:
-        // `tool.end`, `background.tasks`, and the rest. Not silently dropped
-        // by accident — none of them has a place in an OpenAI reply. (Thinking
-        // has its own case above, and its own field on the wire, precisely
-        // so it is never concatenated into `content`, where a caller would
-        // read a model's private reasoning as its answer.)
+        // `tool.end` and the rest. Not silently dropped by accident — none of
+        // them has a place in an OpenAI reply. (Thinking has its own case
+        // above, and its own field on the wire, precisely so it is never
+        // concatenated into `content`, where a caller would read a model's
+        // private reasoning as its answer. Delegated work and deliveries have
+        // theirs too, for the reasons on their `TurnEventBody` members.)
         break;
     }
 
