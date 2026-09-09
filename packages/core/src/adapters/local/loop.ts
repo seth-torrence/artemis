@@ -51,6 +51,20 @@ export interface ChatMessage {
 /** What the user decided about one tool call. */
 export type Approval = 'allow' | 'deny';
 
+/** A message the user sent while the turn was already running. */
+export interface QueuedMessage {
+  readonly text: string;
+  /**
+   * The caller's id for it, as handed to `Run.send`.
+   *
+   * Carried so the delivery can be reported against the row the renderer
+   * already drew — that is what takes the "Queued" chip off it. A message with
+   * no id is still delivered; it simply cannot be matched to anything on
+   * screen.
+   */
+  readonly id?: string;
+}
+
 export interface LoopOptions {
   /** The conversation so far — the system prompt, if any, and the user's turn. */
   readonly initialMessages: readonly ChatMessage[];
@@ -80,6 +94,20 @@ export interface LoopOptions {
    */
   readonly onAppend?: (message: ChatMessage) => void;
   /**
+   * Take everything the user has said since this was last called.
+   *
+   * Called at each turn boundary — after a round of tool calls, and again once
+   * the model has produced an answer. Draining rather than peeking, because a
+   * message this loop has taken is a message it *will* deliver, and a queue
+   * that could be read twice would deliver it twice.
+   *
+   * Absent on a run that cannot be steered, which is every caller that has not
+   * asked for it.
+   */
+  readonly takeQueued?: () => readonly QueuedMessage[];
+  /** Told about each queued message as it joins the conversation. */
+  readonly onDelivered?: (message: QueuedMessage) => void;
+  /**
    * How many completions one turn may take.
    *
    * A ceiling rather than a target. Small models loop — calling the same tool
@@ -103,6 +131,16 @@ export async function runAgentLoop(options: LoopOptions): Promise<string> {
   const max = options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
   const messages: ChatMessage[] = [...options.initialMessages];
   let last = '';
+  /**
+   * Completions since the last thing a *person* said.
+   *
+   * Not since the turn began, which is the whole of the difference steering
+   * makes to the ceiling. The bound exists to catch a small model calling one
+   * tool forever; a user typing is the strongest evidence available that the
+   * run is not doing that, so their message resets the count rather than
+   * spending what is left of it.
+   */
+  let rounds = 0;
 
   /**
    * Add to the conversation, and tell whoever is storing it.
@@ -115,7 +153,30 @@ export async function runAgentLoop(options: LoopOptions): Promise<string> {
     options.onAppend?.(message);
   };
 
-  for (let iteration = 0; iteration < max; iteration += 1) {
+  /**
+   * Fold in whatever the user has said, and report each delivery.
+   *
+   * Appended as ordinary user messages, so the array a later turn replays is
+   * the conversation as it actually happened: the model's work, then the
+   * correction, then the work that followed from it.
+   */
+  const deliverQueued = (): boolean => {
+    const queued = options.takeQueued?.() ?? [];
+    for (const message of queued) {
+      append({ role: 'user', content: message.text });
+      options.onDelivered?.(message);
+    }
+    return queued.length > 0;
+  };
+
+  while (rounds < max) {
+    // The turn boundary. Everything said since the last completion joins the
+    // conversation before the next one is asked for — which is the only point
+    // at which a message can be folded in at all: a completion already
+    // streaming cannot be amended.
+    if (deliverQueued()) rounds = 0;
+    rounds += 1;
+
     const result = await options.complete({ messages, tools: options.tools });
     last = result.text;
 
@@ -127,6 +188,16 @@ export async function runAgentLoop(options: LoopOptions): Promise<string> {
       // An empty one is not recorded: some servers reject a contentless
       // assistant turn, and it would replay as a blank row.
       if (last !== '') append({ role: 'assistant', content: last });
+      /*
+       * A message that arrived while the model was composing this answer has
+       * no tool boundary left to land on, so it lands here: the turn continues
+       * instead of ending, and the user's correction is answered in the
+       * conversation they were watching rather than in a new one.
+       */
+      if (deliverQueued()) {
+        rounds = 0;
+        continue;
+      }
       return last;
     }
 

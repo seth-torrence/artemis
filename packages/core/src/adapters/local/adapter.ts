@@ -34,6 +34,7 @@ import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentError,
   AgentEvent,
+  Attachment,
   Capabilities,
   MessageId,
   PermissionDecision,
@@ -91,7 +92,7 @@ import { parseLlamaServerModels, parseOllamaTags } from './catalogues.js';
 import { parseNativeCatalogue, parseOpenAiCatalogue } from '../lmstudio/catalogue.js';
 import { readEventLine, splitEvents, ToolCallAccumulator } from './stream.js';
 import { runAgentLoop } from './loop.js';
-import type { ChatMessage, CompletionResult } from './loop.js';
+import type { ChatMessage, CompletionResult, QueuedMessage } from './loop.js';
 import { connectToolServers, mergeToolServers } from './mcp.js';
 import type { ConnectedToolServers } from './mcp.js';
 import { toolsForRisk, toWireTools } from './tools.js';
@@ -190,6 +191,19 @@ export const LOCAL_CAPABILITIES: Capabilities = {
   // We own the loop, so we can park it — and must. Every tool call is offered
   // to the user before it runs, under the modes below.
   interactivePermissions: true,
+  /*
+   * We own the loop, so we can also interrupt it with words rather than only
+   * with a stop button.
+   *
+   * `true` in the same sense the Claude adapter means it, and with the same
+   * caveat said out loud: nothing can amend a completion that is already
+   * streaming. What this promises is that a message sent mid-turn is *taken*,
+   * and delivered at the next boundary — after the current round of tool
+   * calls, or after the answer the model was writing when it arrived. `send`
+   * reports `deliveredImmediately: false` for exactly that reason, and the
+   * `message.delivered` event is what tells the renderer the wait is over.
+   */
+  midRunSteering: true,
   /*
    * The server stores no conversation, so Artemis stores it — see
    * `sessionStore.ts`. Everything below follows from owning the file rather
@@ -325,9 +339,9 @@ function toUsage(usage: StreamUsage): UsageSnapshot {
 /**
  * One turn against a local server.
  *
- * Streams until the server says it is done, then ends. `send` is refused rather
- * than queued: without `midRunSteering` the composer is already disabled, and a
- * silently queued message that arrives a turn later is worse than a refusal.
+ * Streams until the server says it is done, then ends — unless the user says
+ * something else in the meantime, in which case the turn takes that in at its
+ * next boundary and keeps going. See {@link LocalRun.send}.
  *
  * The turn is one turn *of a conversation*, which is a claim this class has to
  * make good on by itself: the server it talks to is stateless, so continuity is
@@ -377,6 +391,15 @@ class LocalRun implements Run {
   #usage: UsageSnapshot | undefined;
   /** Approvals the loop is parked on, keyed by the id the renderer answers. */
   readonly #pending = new Map<PermissionRequestId, Deferred<'allow' | 'deny'>>();
+  /**
+   * What the user has said since the loop last looked.
+   *
+   * Drained by the loop at each turn boundary rather than read, so a message
+   * taken from here is one that will be delivered — a queue that could be read
+   * twice would deliver twice. Emptied by an interrupt, because nothing here
+   * survives an abort and `stillQueued` must not claim otherwise.
+   */
+  readonly #queued: QueuedMessage[] = [];
   /** What this machine can enforce. Resolved once; see `#sandbox`. */
   #resolvedSandbox: ResolvedSandbox | undefined;
   /** The run's own writable scratch, made on first use and removed at the end. */
@@ -914,6 +937,22 @@ class LocalRun implements Run {
         onAppend: (message) => {
           this.#persist([{ message, events: this.#storedEvents(message) }]);
         },
+        takeQueued: () => this.#queued.splice(0),
+        /*
+         * The fold, reported.
+         *
+         * `message.delivered` naming the caller's own id is what takes the
+         * "Queued" chip off the row the renderer already drew and the count off
+         * the composer's strip — the same event the Claude path emits when the
+         * CLI records a fold. No text event goes with it: the row is already on
+         * screen, and a second one would be the record of a message being
+         * *read* sitting under the record of it being sent.
+         */
+        onDelivered: (message) => {
+          if (message.id !== undefined) {
+            this.#emit({ type: 'message.delivered', messageId: message.id as MessageId } as never);
+          }
+        },
       });
 
       // The transcript is on disk before the turn is declared over, so a
@@ -956,16 +995,62 @@ class LocalRun implements Run {
     }
   }
 
-  send(): Promise<SendResult> {
-    // Refused rather than queued: `midRunSteering` is false, so the composer is
-    // already disabled, and a message silently delivered a turn later is worse
-    // than one that was plainly not accepted.
-    return Promise.reject(
-      adapterError('invalid_request', `${this.#flavour.label} cannot take a message mid-turn.`),
-    );
+  /**
+   * Take a message into the turn that is already running.
+   *
+   * ## Why this reports `deliveredImmediately: false`
+   *
+   * Because it is queued, and the queue is read at a boundary. A completion
+   * that is already streaming cannot be amended — there is no protocol for it
+   * and no server that would accept one — so the honest answer is "accepted,
+   * not yet read", and `message.delivered` is what later says it was.
+   *
+   * The wait is short and bounded: the next boundary is the end of the current
+   * round of tool calls, or the end of the answer the model was writing. It is
+   * never the end of the *run*, which is what makes this different from
+   * queueing a second turn.
+   *
+   * The refusals carry `details.reason: 'run_ended'` because the renderer's
+   * steer path branches on exactly that to carry the user's words into a fresh
+   * run rather than stranding them under a red banner.
+   */
+  send(text: string, attachments?: readonly Attachment[], messageId?: MessageId): Promise<SendResult> {
+    if (this.#status === 'ended' || this.#abort.signal.aborted) {
+      return Promise.reject(
+        adapterError(
+          'invalid_request',
+          `Run ${this.runId} has already ended; start a new run with resumeSessionId to continue.`,
+          { details: { reason: 'run_ended', runId: this.runId } },
+        ),
+      );
+    }
+    // Refused rather than dropped. `imageInput` is false for this provider, so
+    // a caller that got here has misread the capability, and an attachment
+    // silently discarded turns "what is wrong with this screenshot?" into a
+    // question about nothing.
+    if (attachments !== undefined && attachments.length > 0) {
+      return Promise.reject(
+        adapterError('invalid_request', `${this.#flavour.label} runs cannot take attachments.`),
+      );
+    }
+    if (text.trim() === '') {
+      return Promise.reject(adapterError('invalid_request', 'A message needs some text in it.'));
+    }
+
+    this.#queued.push({ text, ...(messageId === undefined ? {} : { id: messageId }) });
+    return Promise.resolve({ deliveredImmediately: false });
   }
 
   interrupt(): Promise<InterruptResult> {
+    /*
+     * Anything undelivered dies here, and `stillQueued` says so by being empty.
+     *
+     * That field means "accepted, not yet executed, and *will* still run".
+     * Nothing in this queue survives the abort — the loop it was waiting for is
+     * about to unwind — so listing it would be a promise this adapter cannot
+     * keep, and the renderer clears its own queued set when the turn resolves.
+     */
+    this.#queued.length = 0;
     this.#abort.abort();
     return Promise.resolve({ stillQueued: [] });
   }
@@ -983,6 +1068,7 @@ class LocalRun implements Run {
 
 
   dispose(): Promise<void> {
+    this.#queued.length = 0;
     this.#abort.abort();
     this.#queue.close();
     return Promise.resolve();
