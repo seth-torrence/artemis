@@ -774,6 +774,12 @@ export function createRemoteBridge(
         const segments = request.path.split('/').filter((part) => part.length > 0);
         return ok({ path: request.path, name: segments.at(-1) ?? request.path });
       },
+      // The repository is on the serving machine and `git` would have to run
+      // there. Refusing is the honest answer and the one the chip's menu can
+      // show as a reason; a worktree made on *this* machine would be a
+      // directory the run can never reach.
+      createWorktree: async () =>
+        absent('Worktrees are made on the serving machine, which this connection cannot reach.'),
     },
 
     sharedConfig: {

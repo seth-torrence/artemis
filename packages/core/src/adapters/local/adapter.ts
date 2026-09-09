@@ -44,6 +44,7 @@ import type {
   RunInput,
   RunStatus,
   SessionId,
+  UsageScope,
   UsageSnapshot,
 } from '@rx-artemis/protocol';
 import {
@@ -89,6 +90,7 @@ import * as sessionStore from './sessionStore.js';
 import { LOCAL_PROFILE_DIR_ENV } from './sessionStore.js';
 import type { StoredEvent, StoredTurnMessage } from './sessionStore.js';
 import { parseLlamaServerModels, parseOllamaTags } from './catalogues.js';
+import { readContextWindow } from './contextWindow.js';
 import { parseNativeCatalogue, parseOpenAiCatalogue } from '../lmstudio/catalogue.js';
 import { readEventLine, splitEvents, ToolCallAccumulator } from './stream.js';
 import { runAgentLoop } from './loop.js';
@@ -183,6 +185,17 @@ export const LOCAL_CAPABILITIES: Capabilities = {
   usageReporting: true,
   // Local inference has no price to report. Not a gap — there is no number.
   costReporting: false,
+  /*
+   * Both halves of the readout, which needed two different sources.
+   *
+   * The occupancy is arithmetic on what the completion already carries: the
+   * whole conversation is re-sent every turn, so this turn's `prompt_tokens`
+   * plus what the model wrote *is* what the window is holding. The size of the
+   * window is not in the completion at all and is asked for separately — see
+   * `contextWindow.ts` for the chain and for why an unknown denominator is a
+   * supported state rather than a failure.
+   */
+  contextReporting: true,
   // No plan, no limits, nothing to be near the end of.
   planUsageReporting: false,
   // We build the message array ourselves, so a system prompt is just its first
@@ -325,14 +338,40 @@ function authHeaders(env: Readonly<Record<string, string | undefined>>): Record<
   return key !== undefined && key.trim() !== '' ? { authorization: `Bearer ${key.trim()}` } : {};
 }
 
-/** Token counts in the shape the seam expects. */
-function toUsage(usage: StreamUsage): UsageSnapshot {
+/**
+ * Token counts in the shape the seam expects, plus the context reading.
+ *
+ * ## Why the totals are a sum and the occupancy deliberately is not
+ *
+ * These servers are stateless, so this adapter re-sends the whole conversation
+ * on every request. `prompt_tokens` is therefore not "what this message cost" —
+ * it is the measured size of everything the model has been told so far, counted
+ * by the tokenizer that will count it again next turn. Add what the model just
+ * wrote, which is appended to that same conversation, and the total is exactly
+ * what the next request will carry: the current occupancy.
+ *
+ * That is why the reading is taken from the newest completion rather than
+ * accumulated. A turn with four tool calls makes five requests, and each one's
+ * `prompt_tokens` already includes every token the four before it added — so
+ * summing them would count the opening prompt five times and report a window
+ * several times over-full. The totals *are* summed, because those are spend and
+ * spend does accumulate; the occupancy is a measurement and only the latest one
+ * is current.
+ */
+function toUsage(
+  totals: StreamUsage,
+  latest: StreamUsage,
+  scope: UsageScope,
+  contextWindow: number | undefined,
+): UsageSnapshot {
   return {
-    scope: 'final',
+    scope,
     tokens: {
-      inputTokens: usage.promptTokens,
-      outputTokens: usage.completionTokens,
+      inputTokens: totals.promptTokens,
+      outputTokens: totals.completionTokens,
     },
+    contextTokens: latest.promptTokens + latest.completionTokens,
+    ...(contextWindow === undefined ? {} : { contextWindow }),
   };
 }
 
@@ -389,6 +428,38 @@ class LocalRun implements Run {
   /** What each tool call looked like live, keyed by the id its result carries. */
   readonly #toolEvents = new Map<string, StoredEvent[]>();
   #usage: UsageSnapshot | undefined;
+  /**
+   * What the turn has spent, summed over its completions.
+   *
+   * A turn is one request per tool call plus one, and this used to hold only
+   * the last of them — so a turn that read six files reported the tokens of the
+   * final, shortest exchange as though it were the whole turn. Spend
+   * accumulates; see {@link toUsage} for why the *context* reading beside it
+   * deliberately does not.
+   */
+  #totals: StreamUsage = { promptTokens: 0, completionTokens: 0 };
+  /** The newest completion's own counts — the current context occupancy. */
+  #latest: StreamUsage | undefined;
+  /**
+   * The denominator, asked for once and shared by every completion in the run.
+   *
+   * Started at the top of {@link #drive} rather than lazily on the first usage
+   * event, so the two probes overlap the model's first prefill instead of
+   * landing after it — a window that arrives a completion late means the first
+   * gauge the user sees has no scale on it.
+   */
+  #contextWindow: Promise<number | undefined> | undefined;
+  /**
+   * The same number once it has landed, readable without awaiting.
+   *
+   * The stream loop is the hot path — it is what turns bytes into visible text
+   * — and a usage chunk arriving there must not make it wait on an HTTP
+   * request. So the promise writes its answer here when it settles and the loop
+   * reads whatever is there. Missing it costs nothing: the renderer falls back
+   * to the window this model reported last time, and the run's final snapshot
+   * carries the real one.
+   */
+  #windowValue: number | undefined;
   /** Approvals the loop is parked on, keyed by the id the renderer answers. */
   readonly #pending = new Map<PermissionRequestId, Deferred<'allow' | 'deny'>>();
   /**
@@ -605,6 +676,56 @@ class LocalRun implements Run {
     }
   }
 
+  /**
+   * Start asking how big this server's window is. Idempotent.
+   *
+   * Fired at the top of the run rather than when the first count arrives, so
+   * the request overlaps the model's prefill. The result is cached across runs
+   * by `contextWindow.ts`, so this is one pair of requests per server and model
+   * for the life of the process, not one per turn.
+   */
+  #startContextProbe(): void {
+    this.#contextWindow ??= readContextWindow({
+      flavourId: this.#flavour.id,
+      baseUrl: baseUrl(this.#flavour, this.#input.env),
+      model: this.#input.model,
+      headers: authHeaders(this.#input.env),
+      // Stopping the run stops the probe: nothing is waiting for a gauge on a
+      // conversation the user has just abandoned.
+      signal: this.#abort.signal,
+    });
+    void this.#contextWindow.then(
+      (window) => {
+        this.#windowValue = window;
+      },
+      () => undefined,
+    );
+  }
+
+  /**
+   * Fold one completion's counts into the run, and say so immediately.
+   *
+   * The `usage` event is the point of this: the readout used to move only when
+   * a turn ended, because the only snapshot this adapter ever emitted rode on
+   * `run.end`. A long turn — the kind where knowing how full the window is
+   * actually changes what you do next — showed nothing at all until it was too
+   * late to act on it. Now every completion in the turn reports, so the gauge
+   * climbs while the tool calls go past.
+   *
+   * `cumulative` rather than `delta` because {@link #totals} is a real running
+   * total and the store adds `delta` snapshots to what it already holds —
+   * sending both the sum and an instruction to sum it would double the count.
+   */
+  #recordUsage(usage: StreamUsage): void {
+    this.#totals = {
+      promptTokens: this.#totals.promptTokens + usage.promptTokens,
+      completionTokens: this.#totals.completionTokens + usage.completionTokens,
+    };
+    this.#latest = usage;
+    this.#usage = toUsage(this.#totals, usage, 'cumulative', this.#windowValue);
+    this.#emit({ type: 'usage', usage: this.#usage } as never);
+  }
+
   /** One streamed completion, in the shape the loop asks for. */
   async #complete(messages: readonly ChatMessage[], tools: readonly ToolSpec[]): Promise<CompletionResult> {
     const url = `${baseUrl(this.#flavour, this.#input.env)}/v1/chat/completions`;
@@ -646,7 +767,7 @@ class LocalRun implements Run {
         if (delta === 'done') break;
 
         if (delta.error !== undefined) throw adapterError('provider_unavailable', delta.error);
-        if (delta.usage !== undefined) this.#usage = toUsage(delta.usage);
+        if (delta.usage !== undefined) this.#recordUsage(delta.usage);
         if (delta.finishReason !== undefined) finishReason = delta.finishReason;
         if (delta.toolCalls !== undefined) calls.add(delta.toolCalls);
         if (delta.thinking !== undefined) {
@@ -813,9 +934,15 @@ class LocalRun implements Run {
 
   async #drive(): Promise<void> {
     try {
+      // Before anything is sent, so the two small requests it makes overlap the
+      // prefill rather than queue behind it — and the tool servers opening below.
+      this.#startContextProbe();
+
       // Before the session is announced, and inside the try: a failure here is
       // an ordinary run-ending error with an ordinary `run.end`, not a promise
-      // rejection escaping a fire-and-forget call in the constructor.
+      // rejection escaping a fire-and-forget call in the constructor. Awaited
+      // rather than started, because `session.started` announces the tool names
+      // and a server's tools are part of that list.
       await this.#openToolServers();
 
       this.#emit({
@@ -960,12 +1087,29 @@ class LocalRun implements Run {
       // conversation rather than one still being written.
       await this.#writes;
 
+      /*
+       * The last chance to state the denominator.
+       *
+       * `final` is the snapshot the renderer *remembers* — it files the window
+       * against the model so the next run has a scale from its first token. A
+       * probe that landed after the last completion would otherwise be thrown
+       * away, and the memory would never fill. Awaiting is all but free: this
+       * started at the top of the run, so by here it has long settled, and a
+       * server that has not answered by now is bounded by the probe's own
+       * deadline rather than by this line.
+       */
+      const contextWindow = await this.#contextWindow?.catch(() => undefined);
+      const usage =
+        this.#latest === undefined
+          ? this.#usage
+          : toUsage(this.#totals, this.#latest, 'final', contextWindow);
+
       this.#status = 'ended';
       this.#emit({
         type: 'run.end',
         reason: 'completed',
         sessionId: this.#sessionId,
-        ...(this.#usage === undefined ? {} : { usage: this.#usage }),
+        ...(usage === undefined ? {} : { usage }),
       } as never);
     } catch (error) {
       const aborted = this.#abort.signal.aborted;

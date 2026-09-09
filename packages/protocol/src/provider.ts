@@ -198,6 +198,26 @@ export interface Capabilities {
   readonly costReporting: boolean;
 
   /**
+   * The provider reports **both halves** of the context readout: how many
+   * tokens the conversation is occupying, and how large the window they occupy
+   * is — `UsageSnapshot.contextTokens` and `UsageSnapshot.contextWindow`.
+   *
+   * Separate from {@link usageReporting} because the two answer different
+   * questions and a provider can do the first without the second. Token counts
+   * are what a turn *spent*; a context reading is how full the conversation
+   * has become, and it needs a denominator nothing can guess — a table of
+   * model specs held here would go stale silently and print a confidently
+   * wrong "of 128k" under a server started with `-c 32768`.
+   *
+   * The flag exists so the status line can offer a gauge to a provider that
+   * has no plan behind it at all. {@link planUsageReporting} answers "is there
+   * a subscription to be near the end of"; this answers "is there a
+   * conversation to be near the end of", and a local server has the second
+   * without the first.
+   */
+  readonly contextReporting: boolean;
+
+  /**
    * The provider can report consumption against a *plan's* limits, as opposed
    * to the per-run counts {@link usageReporting} covers.
    *
@@ -255,6 +275,27 @@ export interface Capabilities {
    * reason attached.
    */
   readonly systemPromptAppend: boolean;
+
+  /**
+   * The agent can be handed Artemis's own tools, so it can offer follow-up
+   * work at the end of a turn — see `@rx-artemis/protocol`'s `suggestedTasks`.
+   *
+   * A statement about the *transport*, in the same sense as {@link imageInput}:
+   * it says this provider has somewhere to put a tool Artemis defines, whose
+   * handler runs in Artemis's own process. Everything the feature needs follows
+   * from that — the suggestion is a tool call, so it is in the provider's
+   * transcript, so it replays, so the chips come back after a reload.
+   *
+   * A flag rather than a guess, because the failure without one is silent in
+   * both directions. A provider that cannot take host tools simply never offers
+   * a task, which is indistinguishable from an agent that had nothing to
+   * suggest — so the UI would have no way to tell "nothing today" from "never,
+   * here" and would go on implying the feature was working. And the control
+   * this gates is not a button the user presses: there is nothing to disable
+   * and nothing to explain in place, which is why the honest surface is the
+   * provider row rather than a greyed chip that could never appear.
+   */
+  readonly taskSuggestions: boolean;
 }
 
 /**
@@ -280,10 +321,12 @@ export const NO_CAPABILITIES: Capabilities = {
   rewind: false,
   usageReporting: false,
   costReporting: false,
+  contextReporting: false,
   planUsageReporting: false,
   systemPromptAppend: false,
   imageInput: false,
   fileInput: false,
+  taskSuggestions: false,
 };
 
 /**

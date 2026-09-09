@@ -44,7 +44,9 @@ import {
   isSameModel,
   NO_CAPABILITIES,
   recommendProfile,
+  isSuggestedTaskTarget,
   resolvePlanWeight,
+  suggestedTaskBranch,
 } from '@rx-artemis/protocol';
 import type {
   ArtemisBridge,
@@ -83,6 +85,8 @@ import type {
   SessionDelegatedWork,
   SessionId,
   SessionSummary,
+  SuggestedTask,
+  SuggestedTaskTarget,
   TerminalId,
   TokenUsage,
   HandoffTrigger,
@@ -784,6 +788,34 @@ export interface AppState {
    */
   readonly modelBySession: Readonly<Record<string, ModelChoice>>;
   /**
+   * The conversation each account was last working in.
+   *
+   * What a launch reopens into. Nothing used to record it, so every restart
+   * landed on a blank column and left the user to find their own conversation
+   * in a sidebar ordered by the transcript file's mtime — a list that says
+   * which file was written last, which is not the same question and answers it
+   * wrongly the moment a background agent, a scheduled firing or another
+   * profile has touched a file since. The reported failure is exactly that: an
+   * unclean restart, a blank column, and the wrong conversation picked out of
+   * the list a moment later.
+   *
+   * Per profile rather than one id for the window, because a session id only
+   * resolves under the config directory it was written in — see
+   * {@link resumeSession}. The account is the key the restore is looked up
+   * under, so an app that comes back on a different profile comes back on
+   * *that* profile's last conversation rather than on one it cannot read.
+   *
+   * Written the moment a column is pointed at a conversation and the moment a
+   * conversation first reports an id, never on the way out — see
+   * {@link rememberOpenSession}. A pointer that were flushed at quit would be
+   * absent from precisely the restarts it exists for.
+   *
+   * Bounded by the number of profiles, so unlike {@link modelBySession} it
+   * needs no cap. A stale entry costs nothing: the restore resolves it against
+   * the live listing and simply does not fire when the conversation is gone.
+   */
+  readonly lastSessionByProfile: Readonly<Record<string, SessionId>>;
+  /**
    * The dock's arrangement as it was when the app last closed.
    *
    * Read once at boot by `restoreDockLayout` and otherwise inert — it is the
@@ -1168,6 +1200,17 @@ export interface AppState {
   readonly runLocation: 'local' | ProfileId;
   /** The local account to come back to when leaving a server. */
   readonly lastLocalProfileId: ProfileId | null;
+  /**
+   * Which target a suggested task's chip offers as its primary button.
+   *
+   * A window setting rather than a pane one, and remembered across launches,
+   * because it is a habit rather than a decision about one conversation: a
+   * person who works in worktrees works in worktrees, and making them open the
+   * menu every time is the whole cost the primary button exists to remove. The
+   * menu still lists all four, with this one ticked, so the habit is visible
+   * and one click from being changed.
+   */
+  readonly suggestedTaskTarget: SuggestedTaskTarget;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1501,6 +1544,8 @@ interface Prefs {
   readonly runLocation?: string;
   /** The local account to come back to when leaving a server. */
   readonly lastLocalProfileId?: string;
+  /** The suggested-task target the chip's primary button offers. */
+  readonly suggestedTaskTarget?: string;
   /**
    * The last directory worked in, restored as the starting point for the first
    * session of the next launch.
@@ -1548,6 +1593,15 @@ interface Prefs {
    * the next launch, which has no id to be looked up under.
    */
   modelBySession?: Record<string, ModelChoice>;
+  /**
+   * The conversation each account was last working in. See
+   * {@link AppState.lastSessionByProfile}.
+   *
+   * Persisted for the reason the field exists: the whole value of knowing which
+   * conversation a window was in is being able to open it again after the
+   * window is gone.
+   */
+  lastSessionByProfile?: Record<string, string>;
   dockLayout?: unknown;
   /**
    * Each conversation's dock arrangement, keyed by session id. The
@@ -1859,6 +1913,23 @@ function numberMap(value: unknown): Record<string, number> | undefined {
 }
 
 /**
+ * Keep only the entries whose value is a non-empty string.
+ *
+ * The same rule as {@link stringList} one map deeper. `lastSessionByProfile`
+ * reaches a session lookup at boot, and an empty string there would match
+ * nothing while still counting as a pointer — a launch that spends a listing
+ * resolving a conversation that cannot exist.
+ */
+function stringMap(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === 'string' && entry !== '') out[key] = entry;
+  }
+  return out;
+}
+
+/**
  * The stored preferences text, from the file, or from `localStorage` once.
  *
  * The file is where these live now — see `main/prefs.ts` for why they left
@@ -1982,9 +2053,13 @@ function loadPrefs(): Prefs {
     // on a control the user opens to get *out* of a bad directory.
     recentFolders: stringList(raw['recentFolders']),
     modelBySession: modelChoiceMap(raw['modelBySession']),
+    lastSessionByProfile: stringMap(raw['lastSessionByProfile']),
     ...(typeof raw['runLocation'] === 'string' ? { runLocation: raw['runLocation'] } : {}),
     ...(typeof raw['lastLocalProfileId'] === 'string'
       ? { lastLocalProfileId: raw['lastLocalProfileId'] }
+      : {}),
+    ...(typeof raw['suggestedTaskTarget'] === 'string'
+      ? { suggestedTaskTarget: raw['suggestedTaskTarget'] }
       : {}),
   };
 }
@@ -2105,6 +2180,7 @@ function savePrefs(): void {
     settingsSection: s.settingsSection,
     quickModelIdsByProfile: s.quickModelIdsByProfile,
     modelBySession: s.modelBySession,
+    lastSessionByProfile: s.lastSessionByProfile,
     dockLayout: captureDockLayout(s),
     dockLayouts: captureDockArrangements(s),
     conversationWidth: s.conversationWidth,
@@ -2125,6 +2201,7 @@ function savePrefs(): void {
     sharedClaudeConfigAcknowledged: s.sharedClaudeConfigAcknowledged,
     contextWindows: s.contextWindows,
     runLocation: s.runLocation,
+    suggestedTaskTarget: s.suggestedTaskTarget,
     ...(s.lastLocalProfileId === null ? {} : { lastLocalProfileId: s.lastLocalProfileId }),
   };
   const json = JSON.stringify(prefs);
@@ -2232,6 +2309,7 @@ function seedSession(overrides: Partial<SessionState> = {}): SessionState {
     permissionQueue: [],
     tasks: [],
     dismissedTasks: [],
+    dismissedSuggestedTasks: [],
     tasksRequested: false,
     filesRequested: false,
     documentsRequested: false,
@@ -2327,6 +2405,7 @@ export const useApp = create<AppState>(() => ({
 
   quickModelIdsByProfile: prefs.quickModelIdsByProfile ?? {},
   modelBySession: prefs.modelBySession ?? {},
+  lastSessionByProfile: prefs.lastSessionByProfile ?? {},
   conversationWidth: prefs.conversationWidth ?? DEFAULT_CONVERSATION_WIDTH,
   runSummary: prefs.runSummary ?? DEFAULT_RUN_SUMMARY,
   fontSize: initialFontSize,
@@ -2394,6 +2473,12 @@ export const useApp = create<AppState>(() => ({
   // honest fallback there is this machine.
   runLocation: (prefs.runLocation ?? 'local') as 'local' | ProfileId,
   lastLocalProfileId: (prefs.lastLocalProfileId as ProfileId | undefined) ?? null,
+  // Guarded rather than cast, unlike its neighbour above: this one names a
+  // branch of a switch, and a stored string from a build that spelled the
+  // targets differently would reach that switch and match nothing at all.
+  suggestedTaskTarget: isSuggestedTaskTarget(prefs.suggestedTaskTarget)
+    ? prefs.suggestedTaskTarget
+    : 'here',
 }));
 
 /* -------------------------------------------------------------------------- */
@@ -3461,6 +3546,7 @@ export function openAgentTab(paneId: PaneId, taskId: string): void {
     permissionQueue: [],
     tasks: [],
     dismissedTasks: [],
+    dismissedSuggestedTasks: [],
     tasksRequested: false,
     rewindToMessageId: null,
     draft: '',
@@ -5787,6 +5873,295 @@ export function dismissSuggestion(pane: Pane): void {
   setPaneState(pane, { suggestion: null });
 }
 
+/* -------------------------------------------------------------------------- */
+/* Suggested tasks                                                            */
+/* -------------------------------------------------------------------------- */
+
+/** Whether a suggested task can be started here, and the sentence when it cannot. */
+export type SuggestedTaskTargetStatus =
+  | { readonly available: true }
+  | { readonly available: false; readonly reason: string };
+
+/**
+ * Everything {@link suggestedTaskTargetStatus} needs, and nothing else.
+ *
+ * Three values rather than the two stores, so the chip can subscribe to exactly
+ * what could change its menu and memoise on it. Handed the whole `SessionState`
+ * the function would be correct and the component would recompute four statuses
+ * on every keystroke in the composer beside it.
+ */
+export interface SuggestedTaskContext {
+  readonly cwd: string;
+  readonly workspace: WorkspaceNames | null;
+  /** Is there an enabled Artemis Server profile to send work to? */
+  readonly hasServer: boolean;
+}
+
+/** Read {@link SuggestedTaskContext} off the stores. */
+export function suggestedTaskContext(
+  state: SessionState,
+  app: AppState = useApp.getState(),
+): SuggestedTaskContext {
+  return { cwd: state.cwd, workspace: state.workspace, hasServer: serverProfile(app) !== undefined };
+}
+
+/**
+ * Where a suggested task can be started from this column, and why not.
+ *
+ * One function rather than four checks scattered through the menu, because the
+ * menu's whole obligation is to be *the same* answer as the action: an option
+ * that opens and then fails is worse than one that was disabled with a reason,
+ * and the only way to guarantee the two agree is for both to read this.
+ *
+ * Never hides a target. All four stay in the menu — see `capability-button.tsx`
+ * on the house rule — because "Start with worktree, disabled: this directory is
+ * not in a git repository" tells the user something about their situation, and
+ * a menu that is silently one item shorter tells them nothing at all.
+ */
+export function suggestedTaskTargetStatus(
+  context: SuggestedTaskContext,
+  target: SuggestedTaskTarget,
+): SuggestedTaskTargetStatus {
+  switch (target) {
+    case 'here':
+      // Deliberately available mid-run: `submitPrompt` steers a live turn where
+      // the provider allows it and refuses with its own sentence where it does
+      // not, and both are better answers to "do this next" than a greyed row.
+      return { available: true };
+
+    case 'session':
+      // Always. A full grid is not a refusal — the column falls back to
+      // starting the conversation in place, which keeps the old one running in
+      // the background. See `openTaskColumn`.
+      return { available: true };
+
+    case 'worktree': {
+      if (context.cwd.trim().length === 0) {
+        return { available: false, reason: 'This conversation has no working directory yet.' };
+      }
+      // `workspace` is null for the moment after a column moves, while the
+      // directory is being described. Refusing then would make the menu's
+      // answer depend on how quickly the user opened it.
+      if (context.workspace === null) {
+        return { available: false, reason: 'Still reading what this directory is.' };
+      }
+      if (context.workspace.repoRoot === undefined) {
+        return {
+          available: false,
+          reason: `${context.cwd} is not in a git repository, so there is nothing to split a worktree off.`,
+        };
+      }
+      return { available: true };
+    }
+
+    case 'server':
+      return context.hasServer
+        ? { available: true }
+        : {
+            available: false,
+            reason:
+              'No Artemis Server profile is set up, so there is no other machine to run this on.',
+          };
+  }
+}
+
+/** The server this column would send a task to, or `undefined`. */
+function serverProfile(app: AppState = useApp.getState()): ProfileMetadata | undefined {
+  return app.profiles.find(
+    (profile) => profile.providerId === 'artemis' && isProfileEnabled(profile),
+  );
+}
+
+/**
+ * Put a suggested task away.
+ *
+ * By the id of the call that offered it, and only in this column — see
+ * `SessionState.dismissedSuggestedTasks` for why this is not persisted, and why
+ * that is the right way round.
+ */
+export function dismissSuggestedTask(callId: string, pane: Pane = focusedPane()): void {
+  const { dismissedSuggestedTasks } = paneState(pane);
+  if (dismissedSuggestedTasks.includes(callId)) return;
+  setPaneState(pane, { dismissedSuggestedTasks: [...dismissedSuggestedTasks, callId] });
+}
+
+/** Whether this column has put that suggestion away. */
+export function suggestedTaskDismissed(state: SessionState, callId: string): boolean {
+  return state.dismissedSuggestedTasks.includes(callId);
+}
+
+/**
+ * Remember which target the chip's primary button should offer.
+ *
+ * Written on every start rather than by a separate "make this the default"
+ * control, so the habit follows what the user does instead of asking them to
+ * declare it. See {@link AppState.suggestedTaskTarget}.
+ */
+export function setSuggestedTaskTarget(target: SuggestedTaskTarget): void {
+  if (useApp.getState().suggestedTaskTarget === target) return;
+  useApp.setState({ suggestedTaskTarget: target });
+  savePrefs();
+}
+
+/**
+ * Start a suggested task, wherever the user chose to put it.
+ *
+ * Every target ends in the same place — `submitPrompt` carrying the agent's own
+ * prompt — and differs only in *which column* and *which directory* that prompt
+ * lands in. One function with a switch rather than four exported actions,
+ * because the four share the part that is easy to get wrong: the send must go
+ * to the pane that came back and never to the one the chip was clicked in, and
+ * a target that could not prepare its column must not send at all.
+ *
+ * The chip is put away on success only. A worktree that could not be created
+ * leaves the offer standing, because the user is about to try it somewhere
+ * else, and hunting back through a transcript for a chip that vanished on a
+ * failure is the wrong way to learn what happened.
+ *
+ * ## The server target hands over rather than sending
+ *
+ * Three of the four end in a send. `server` deliberately does not: it opens the
+ * column, points it at the server, puts the prompt in the composer and gives
+ * the caret back. The user picks the account, the model and the thinking level
+ * and presses send themselves.
+ *
+ * That is not politeness, it is the only correct behaviour available here, and
+ * two concrete faults say so. **The catalogue is not there yet.** A freshly
+ * split column has no models until `refreshModels` answers, which for a server
+ * is a round trip; sending into that gap posts a run with no model and the
+ * server replies `model_not_found`. **And the account would be arbitrary.** The
+ * new column's model choice is null, so `activeModel` falls back to
+ * `models[0]` — whichever route the server happened to list first. A local
+ * target has one obvious answer to both questions and a server has neither:
+ * which served account runs the work, on which model, at what thinking level,
+ * is exactly the choice a person moves work to a server in order to make.
+ *
+ * So `serverProfile()` picks only the column's *starting* profile. Nothing is
+ * live in it, so every one of those choices is still the user's to change.
+ */
+export async function startSuggestedTask(
+  callId: string,
+  task: SuggestedTask,
+  target: SuggestedTaskTarget,
+  pane: Pane = focusedPane(),
+): Promise<void> {
+  const column = await prepareSuggestedTaskColumn(target, task, pane);
+  if (column === null) return;
+
+  setSuggestedTaskTarget(target);
+  dismissSuggestedTask(callId, pane);
+
+  if (target === 'server') {
+    // The same field a restored or parked draft lands in — see `swapDraft` —
+    // so the prompt is editable, recallable and survives the column being
+    // looked away from, exactly as anything else typed here would.
+    setPaneState(column, { draft: task.prompt });
+    focusComposer(column.id);
+    return;
+  }
+
+  await submitPrompt(task.prompt, undefined, column);
+}
+
+/**
+ * Get a column ready for a suggested task, or `null` if it could not be.
+ *
+ * The half of {@link startSuggestedTask} that can fail, split out so that the
+ * send itself has no branches in it.
+ */
+async function prepareSuggestedTaskColumn(
+  target: SuggestedTaskTarget,
+  task: SuggestedTask,
+  pane: Pane,
+): Promise<Pane | null> {
+  switch (target) {
+    case 'here':
+      return pane;
+
+    case 'session':
+      return openTaskColumn(pane);
+
+    case 'worktree': {
+      // Before the column, so a failure costs the user nothing: an empty pane
+      // opened for work that then could not start is a pane they have to close.
+      const path = await createTaskWorktree(task, pane);
+      if (path === null) return null;
+      const column = openTaskColumn(pane);
+      // On the column that will do the sending, which is what makes the run
+      // start in the worktree rather than in the checkout it was split from —
+      // the entire point of the choice.
+      setCwd(path, column);
+      return column;
+    }
+
+    case 'server': {
+      const server = serverProfile();
+      if (server === undefined) {
+        pushBanner(
+          'error',
+          'No server to send this to',
+          'Add an Artemis Server profile, and this option will start the task on it.',
+        );
+        return null;
+      }
+      const column = openTaskColumn(pane);
+      // Per column, not `setRunLocation`: choosing where *one task* runs says
+      // nothing about where new conversations go, and quietly moving that
+      // preference is how somebody ends up billing a week of work to a machine
+      // they picked once.
+      //
+      // A starting point, not a decision. The caller hands the prompt to this
+      // column's composer instead of sending it, so the profile — and the
+      // model and thinking level under it — are all still open. See
+      // {@link startSuggestedTask}.
+      setProfile(server.id, column);
+      return column;
+    }
+  }
+}
+
+/**
+ * A column for a task that is not this conversation.
+ *
+ * Beside it where the grid has room, because the conversation that offered the
+ * suggestion is the context for reading it, and taking that off screen is a
+ * strange reward for accepting. A full grid falls back to {@link newSession} in
+ * place, which leaves the old conversation running in the background and
+ * reachable from the sidebar — a smaller loss than refusing.
+ */
+function openTaskColumn(pane: Pane): Pane {
+  return splitPane('right', pane) ?? newSession(pane);
+}
+
+/**
+ * Split a worktree for a task, and say where it landed.
+ *
+ * `null` on any failure, with the reason already on screen. The branch is named
+ * from the task's *title* rather than its prompt, so `task/add-parser-tests` is
+ * what shows up in `git branch` a week later.
+ */
+async function createTaskWorktree(task: SuggestedTask, pane: Pane): Promise<string | null> {
+  const state = paneState(pane);
+  const { bridge } = resolveBridge();
+  if (!bridge) return null;
+
+  const status = suggestedTaskTargetStatus(suggestedTaskContext(state), 'worktree');
+  if (!status.available) {
+    pushBanner('warn', 'Cannot make a worktree here', status.reason);
+    return null;
+  }
+
+  const result = await bridge.workspace.createWorktree({
+    path: state.cwd,
+    branch: suggestedTaskBranch(task.title),
+  });
+  if (!result.ok) {
+    reportFailure('Could not create a worktree', result.error);
+    return null;
+  }
+  return result.value.path;
+}
+
 /**
  * Subscribe to terminal output. Call alongside {@link installEventBridge}.
  *
@@ -6639,6 +7014,12 @@ export async function bootstrap(): Promise<void> {
   await adoptTerminals(focusedPane());
   await adoptBrowsers(focusedPane());
   await refreshSessions();
+  // The conversation this account was last working in, back in the column it
+  // was left in. After the listing, which is what resolves the stored id into
+  // something openable, and before the reads below, so those are issued for the
+  // account and directory the restored conversation runs under rather than for
+  // the seed it displaced.
+  restoreLastSession(focusedPane());
   useApp.setState({ booted: true });
 
   // Deliberately after `booted`, and deliberately not awaited. Fetching the
@@ -7343,7 +7724,9 @@ async function attachRun(pane: Pane, handle: RunHandle): Promise<void> {
     // new one. See `blankTranscript`, and the clear in the `finally`.
     historyLoading: true,
     permissionQueue: [],
-    ...(sameSession ? {} : { tasks: [], dismissedTasks: [], tasksRequested: false }),
+    ...(sameSession
+      ? {}
+      : { tasks: [], dismissedTasks: [], dismissedSuggestedTasks: [], tasksRequested: false }),
     // The session the next prompt continues is this run's own. Set now rather
     // than waiting for `run.end`, because until it is set the sidebar cannot
     // mark the row the user needs in order to find this conversation again.
@@ -8475,6 +8858,93 @@ function rememberModelChoice(pane: Pane): void {
     next[sessionId] = choice;
     return { modelBySession: capModelMemory(next) };
   });
+}
+
+/**
+ * File the conversation showing in a column under the account that pays for it.
+ *
+ * The pointer {@link restoreLastSession} reads at boot, and the moments it is
+ * written are the whole of it. Both are moments *inside* a session's life
+ * rather than at the end of one:
+ *
+ *  - a column is pointed at a conversation ({@link resumeSession}), and
+ *  - a conversation first reports an id (`session.started`, and the promotion
+ *    at `run.end` for the fork whose id only arrives there).
+ *
+ * Writing it on the way out instead — at quit, or from a window listener —
+ * would record nothing in exactly the case this exists for. The incident that
+ * prompted it was a machine that went down with the app still running: there
+ * was no quit, so a quit-time write would have persisted the conversation
+ * *before* the one the user lost.
+ *
+ * A column showing nothing records nothing, the same rule
+ * {@link rememberModelChoice} follows: an unstarted conversation has no id, and
+ * "the account is between conversations" is not worth overwriting a good
+ * pointer with.
+ *
+ * Writes state and nothing else, as its neighbour does — persisting is the
+ * caller's, because the two call sites in {@link resumeSession} save anyway and
+ * a second write there would be a second atomic rewrite of the file per click.
+ * Returns whether the entry moved, so the call site on the event path can save
+ * only when it did.
+ */
+function rememberOpenSession(pane: Pane): boolean {
+  const state = paneState(pane);
+  const profileId = state.activeProfileId;
+  const sessionId = sessionShownBy(state);
+  if (profileId === null || sessionId === null) return false;
+  // Never file a conversation under an account that is not the one running it.
+  // A run bills the account it started on for its whole life, so a profile
+  // switched while a turn was in flight leaves the column naming one account
+  // and the run another — and a pointer written from that moment would send
+  // the next launch at a transcript the account it is filed under cannot read,
+  // over the top of a perfectly good one.
+  if (state.run !== null && state.run.profileId !== profileId) return false;
+  if (useApp.getState().lastSessionByProfile[profileId] === sessionId) return false;
+
+  useApp.setState((s) => ({
+    lastSessionByProfile: { ...s.lastSessionByProfile, [profileId]: sessionId },
+  }));
+  return true;
+}
+
+/**
+ * Put a column back on the conversation its account was last working in.
+ *
+ * Called once, from {@link bootstrap}, after the listing has landed — the
+ * listing is both what proves the conversation still exists and what carries
+ * the profile, provider and directory it has to be opened under.
+ *
+ * Nothing happens when the column already holds a conversation. A run adopted
+ * seconds earlier by {@link adoptLiveRuns} is an agent working *now*, which
+ * outranks any pointer written before the app went down, and a window that
+ * moved the column onto it must not have that taken away by a restore.
+ *
+ * Resolved through {@link resumeSession} rather than by writing
+ * `resumeSessionId`, because the id alone is not enough: a session resolves
+ * only under the account and directory it was written in, and everything else
+ * that belongs to reopening a conversation — its model, its dock, its history —
+ * hangs off that one function. This is the click the user used to have to make
+ * themselves, made for them.
+ */
+function restoreLastSession(pane: Pane = focusedPane()): void {
+  const state = paneState(pane);
+  if (state.run !== null || state.resumeSessionId !== null) return;
+
+  const profileId = state.activeProfileId;
+  if (profileId === null) return;
+
+  const app = useApp.getState();
+  const wanted = app.lastSessionByProfile[profileId];
+  if (wanted === undefined) return;
+
+  // Reachable by *this* account, not merely present: the listing spans every
+  // profile, and resuming a row another account owns would switch who pays
+  // without anyone asking for it.
+  const session = app.sessions.find((one) => one.id === wanted && canReachSession(one, profileId));
+  if (session === undefined) return;
+
+  resumeSession(session, pane);
 }
 
 /**
@@ -10131,6 +10601,7 @@ export function newSession(
       permissionQueue: [],
       tasks: [],
       dismissedTasks: [],
+      dismissedSuggestedTasks: [],
       tasksRequested: false,
       filesRequested: false,
       documentsRequested: false,
@@ -10291,6 +10762,9 @@ export function resumeSession(session: SessionSummary, pane: Pane = focusedPane(
   if (open !== undefined) {
     if (useApp.getState().background.some((p) => p.id === open.id)) handOver(pane, open);
     useApp.setState({ paletteOpen: false, focusedPaneId: open.id });
+    // A return is a switch: this is the conversation to come back to now, and
+    // the column it is in is the one that knows which account is paying.
+    rememberOpenSession(open);
     savePrefs();
     /*
      * "Already open" is only a layout answer, not a liveness answer.
@@ -10343,6 +10817,7 @@ export function resumeSession(session: SessionSummary, pane: Pane = focusedPane(
     permissionQueue: [],
     tasks: [],
     dismissedTasks: [],
+    dismissedSuggestedTasks: [],
     tasksRequested: false,
     // The question belonged to the conversation this column is leaving.
     handoffOffer: null,
@@ -10368,6 +10843,10 @@ export function resumeSession(session: SessionSummary, pane: Pane = focusedPane(
   // the one that most often names a scratch checkout, which `rememberFolder`
   // declines.
   rememberFolder(session.cwd);
+  // The conversation to reopen into next launch, recorded now rather than at
+  // quit — see `rememberOpenSession`. Before the save below, so the pointer and
+  // the directory beside it reach the file in the same write.
+  rememberOpenSession(target);
   savePrefs();
 
   const moved = [
@@ -12246,6 +12725,11 @@ function applyAgentEvent(event: AgentEvent): void {
           ...(event.permissionMode === undefined ? {} : { permissionMode: event.permissionMode }),
         },
       });
+      // The moment a brand-new conversation acquires an identity is the moment
+      // it can be reopened, so it becomes this account's conversation to come
+      // back to now — not when the turn ends, and certainly not at quit. See
+      // `rememberOpenSession`.
+      if (rememberOpenSession(pane)) savePrefs();
       // A session that has only just been created is not in the list the
       // sidebar is currently showing. Waiting for `run.end` to reveal it means
       // the thing the user is watching happen is the one thing missing from
@@ -12357,6 +12841,10 @@ function applyAgentEvent(event: AgentEvent): void {
             }
           : s.run,
       }));
+      // A fork's own id exists only from here — `session.started` reported the
+      // conversation it branched from — so the promotion above is the first and
+      // only chance to record the branch as what this account is working in.
+      if (rememberOpenSession(pane)) savePrefs();
       if (event.error) {
         if (event.error.code === 'rate_limit') {
           // The limit wall grows a door: name the window that tripped and when

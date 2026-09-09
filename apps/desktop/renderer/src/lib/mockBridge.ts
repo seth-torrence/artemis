@@ -50,6 +50,7 @@ import type {
   TerminalInfo,
   Unsubscribe,
   WindowState,
+  WorkspaceDescribeResponse,
 } from '@rx-artemis/protocol';
 import {
   ARTEMIS_RELEASES_URL,
@@ -149,10 +150,12 @@ const CLAUDE_CAPS: Capabilities = {
   rewind: true,
   usageReporting: true,
   costReporting: true,
+  contextReporting: true,
   planUsageReporting: true,
   systemPromptAppend: true,
   imageInput: true,
   fileInput: true,
+  taskSuggestions: true,
 };
 
 /** A deliberately weaker provider, so capability gating is visible in dev. */
@@ -172,6 +175,7 @@ const CODEX_CAPS: Capabilities = {
   rewind: false,
   usageReporting: true,
   costReporting: false,
+  contextReporting: true,
   // True, as the real adapter declares: Codex answers `account/rateLimits/read`
   // like Claude answers its own. What differs is the *shape* of the answer —
   // see `mockCodexPlanUsage`.
@@ -188,6 +192,10 @@ const CODEX_CAPS: Capabilities = {
   // would be no way to see it without editing this file.
   imageInput: false,
   fileInput: false,
+  // False, as the real adapter declares: nothing in Codex's app-server protocol
+  // takes a host-defined tool, so there is nowhere to put `suggest_task`. This
+  // is the flag that keeps chips out of a Codex conversation entirely.
+  taskSuggestions: false,
 };
 
 /**
@@ -689,6 +697,53 @@ let mockAgentPrompts: AgentPromptsDocument = parseAgentPromptsDocument({
     },
   ],
 });
+
+/**
+ * The mock's answer for what a directory is, shared by the two channels that
+ * need it: naming one, and splitting a worktree off it.
+ *
+ * A module-level function rather than a closure inside the bridge, because the
+ * second caller is a sibling entry in the same frozen object and cannot reach
+ * the first.
+ */
+function mockWorkspace(path: string): WorkspaceDescribeResponse {
+  const segments = path.split('/').filter(Boolean);
+  const name = segments.at(-1) ?? path;
+  const temporary = segments[0] === 'tmp' ? { temporary: true } : {};
+  if (path.includes('/scratch/')) return { path, name, ...temporary };
+
+  const linked = segments.indexOf('worktrees');
+  if (linked >= 0) {
+    // The worktree's root is the directory *below* `worktrees/`, so a cwd
+    // deeper inside one still reports the checkout it belongs to.
+    const repoRoot = `/${segments.slice(0, linked + 2).join('/')}`;
+    const repoName = repoRoot.split('/').at(-1) ?? name;
+    /*
+     * And the project is whatever the worktree was split off from — the real
+     * thing reads that out of the `gitdir:` pointer, which the mock has no file
+     * to read. Everything above `worktrees/`, with a `.claude` container
+     * dropped, is the layout an agent's worktree actually has
+     * (`<repo>/.claude/worktrees/<branch>`) and is enough to exercise the
+     * sidebar grouping a worktree under its repository.
+     */
+    const above = segments.slice(0, linked);
+    if (above.at(-1) === '.claude') above.pop();
+    const projectRoot = above.length > 0 ? `/${above.join('/')}` : repoRoot;
+    return { path, name, repoRoot, repoName, projectRoot, worktree: true, ...temporary };
+  }
+
+  const depth = segments.indexOf('monorepo');
+  const repoRoot = depth < 0 ? path : `/${segments.slice(0, depth + 1).join('/')}`;
+  return {
+    path,
+    name,
+    repoRoot,
+    repoName: repoRoot.split('/').at(-1) ?? name,
+    // Not a worktree, so the project is the repository itself.
+    projectRoot: repoRoot,
+    ...temporary,
+  };
+}
 
 export function createMockBridge(): ArtemisBridge {
   /** Profiles a `refresh` has been run for — what fills the real cache. */
@@ -1629,43 +1684,21 @@ export function createMockBridge(): ArtemisBridge {
        *                   spelling that is recognisable on sight.
        *  - everything else — the ordinary clone, cwd at the root.
        */
-      describe: async ({ path }) => {
-        const segments = path.split('/').filter(Boolean);
-        const name = segments.at(-1) ?? path;
-        const temporary = segments[0] === 'tmp' ? { temporary: true } : {};
-        if (path.includes('/scratch/')) return ok({ path, name, ...temporary });
+      describe: async ({ path }) => ok(mockWorkspace(path)),
 
-        const linked = segments.indexOf('worktrees');
-        if (linked >= 0) {
-          // The worktree's root is the directory *below* `worktrees/`, so a cwd
-          // deeper inside one still reports the checkout it belongs to.
-          const repoRoot = `/${segments.slice(0, linked + 2).join('/')}`;
-          const repoName = repoRoot.split('/').at(-1) ?? name;
-          /*
-           * And the project is whatever the worktree was split off from — the
-           * real thing reads that out of the `gitdir:` pointer, which the mock
-           * has no file to read. Everything above `worktrees/`, with a `.claude`
-           * container dropped, is the layout an agent's worktree actually has
-           * (`<repo>/.claude/worktrees/<branch>`) and is enough to exercise the
-           * sidebar grouping a worktree under its repository.
-           */
-          const above = segments.slice(0, linked);
-          if (above.at(-1) === '.claude') above.pop();
-          const projectRoot = above.length > 0 ? `/${above.join('/')}` : repoRoot;
-          return ok({ path, name, repoRoot, repoName, projectRoot, worktree: true, ...temporary });
-        }
-
-        const depth = segments.indexOf('monorepo');
-        const repoRoot = depth < 0 ? path : `/${segments.slice(0, depth + 1).join('/')}`;
-        return ok({
-          path,
-          name,
-          repoRoot,
-          repoName: repoRoot.split('/').at(-1) ?? name,
-          // Not a worktree, so the project is the repository itself.
-          projectRoot: repoRoot,
-          ...temporary,
-        });
+      /*
+       * No git to run, so the mock answers with the path the real one would
+       * have produced — `<repo>/.worktrees/<branch>` — which makes a suggested
+       * task's "Start with worktree" reachable in dev right through to the new
+       * column opening in the right directory. The one thing it cannot fake
+       * usefully is failure: a mock that refused on a timer would make the
+       * option unpredictable, and the real failures (no git on the PATH, a
+       * repository with no commits) are reachable in the app.
+       */
+      createWorktree: async ({ path, branch }) => {
+        const described = mockWorkspace(path);
+        const root = described.projectRoot ?? described.repoRoot ?? path;
+        return ok({ path: `${root}/.worktrees/${branch}`, branch });
       },
     },
 

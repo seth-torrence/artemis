@@ -32,6 +32,7 @@ import {
   validateTerminalWrite,
   validateUpdatesCheck,
   validateWindowRequest,
+  validateWorkspaceCreateWorktree,
 } from './validate.js';
 
 /**
@@ -1640,3 +1641,53 @@ describe('validateAgentPromptsSave: built-ins the user removed', () => {
   });
 });
 
+
+/**
+ * The branch a worktree is created on.
+ *
+ * This is the one string the renderer sends that becomes both a directory under
+ * the user's checkout and a ref inside their `.git`. `suggestedTaskBranch`
+ * already reduces a task title to a safe name, and that is not the point: this
+ * channel is reachable by anything running in the renderer, so the shape is
+ * checked here rather than trusted to the one caller that composes it.
+ */
+describe('validateWorkspaceCreateWorktree', () => {
+  const ROOT = '/code/kronos';
+
+  it('accepts a slug of the shape the composer produces', () => {
+    expect(validateWorkspaceCreateWorktree({ path: ROOT, branch: 'task/add-tests-2' })).toEqual({
+      path: ROOT,
+      branch: 'task/add-tests-2',
+    });
+  });
+
+  it.each([
+    ['traversal', '../../../etc'],
+    ['an absolute path', '/etc/passwd'],
+    ['a leading slash segment', '/task/x'],
+    ['a trailing slash', 'task/'],
+    ['a backslash', String.raw`task\..\..\x`],
+    ['a space', 'task/add tests'],
+    ['a capital', 'Task/Add-Tests'],
+    ['a dot, which git also refuses next to another', 'task/add..tests'],
+    ['nothing at all', ''],
+  ])('refuses %s', (_why, branch) => {
+    expect(() => validateWorkspaceCreateWorktree({ path: ROOT, branch })).toThrow(ValidationError);
+  });
+
+  it('refuses a relative directory, like every other path on this surface', () => {
+    expect(() => validateWorkspaceCreateWorktree({ path: 'kronos', branch: 'task/x' })).toThrow(
+      ValidationError,
+    );
+  });
+
+  it('drops fields nobody asked for', () => {
+    const request = validateWorkspaceCreateWorktree({
+      path: ROOT,
+      branch: 'task/x',
+      force: true,
+      cwd: '/somewhere/else',
+    });
+    expect(request).toEqual({ path: ROOT, branch: 'task/x' });
+  });
+});

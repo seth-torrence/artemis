@@ -16,7 +16,12 @@
  * matches the test's idea of the request.
  */
 
-import { createServer, type IncomingMessage, type Server } from 'node:http';
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { chmod, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -45,6 +50,24 @@ interface WireMessage {
 }
 
 /**
+ * Everything a run asks for that is not a completion.
+ *
+ * A run also probes for the size of the context window — `/props`, then
+ * `/v1/models` — and these fixtures used to answer *every* path with the next
+ * scripted completion. That made the probe eat a scripted reply and a `GET`
+ * with no body reach a `JSON.parse`. Answering 404 is what a server that does
+ * not expose those endpoints does, and the reading degrades to "unknown", which
+ * is the state under test everywhere else in this file: none of it is about the
+ * window.
+ */
+function notACompletion(request: IncomingMessage, response: ServerResponse): boolean {
+  if (request.url === '/v1/chat/completions') return false;
+  request.resume();
+  response.writeHead(404, { 'content-type': 'application/json' }).end('{}');
+  return true;
+}
+
+/**
  * A server that answers completions with a scripted reply, recording what it
  * was sent. One reply per request, then a plain acknowledgement.
  */
@@ -55,6 +78,7 @@ async function serveCompletions(
   let answered = 0;
 
   const server = createServer((request: IncomingMessage, response) => {
+    if (notACompletion(request, response)) return;
     const chunks: Buffer[] = [];
     request.on('data', (chunk: Buffer) => chunks.push(chunk));
     request.on('end', () => {
@@ -88,6 +112,7 @@ async function serveCompletions(
 async function serveToolCall(calls = 1): Promise<{ origin: string }> {
   let answered = 0;
   const server = createServer((request: IncomingMessage, response) => {
+    if (notACompletion(request, response)) return;
     request.resume();
     request.on('end', () => {
       response.writeHead(200, { 'content-type': 'text/event-stream' });

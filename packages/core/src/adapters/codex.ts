@@ -184,6 +184,8 @@ export const CODEX_CAPABILITIES: Capabilities = {
   resumeSession: true,
   rewind: false,
   usageReporting: true,
+  // `token_count`'s `modelContextWindow`, with `last.totalTokens` as occupancy.
+  contextReporting: true,
   planUsageReporting: true,
   /**
    * No delegation concept exists anywhere in the app server. Established

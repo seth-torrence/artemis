@@ -33,10 +33,12 @@ export const CAPABILITY_LABELS: Record<CapabilityKey, string> = {
   rewind: 'rewinding a conversation',
   usageReporting: 'token usage reporting',
   costReporting: 'cost reporting',
+  contextReporting: 'context window reporting',
   planUsageReporting: 'plan usage reporting',
   systemPromptAppend: 'standing instructions from the prompt library',
   imageInput: 'images in a prompt',
   fileInput: 'file attachments',
+  taskSuggestions: 'follow-up tasks suggested by the agent',
 };
 
 export interface CapabilityStatus {

@@ -59,7 +59,7 @@ import {
   type WorkspacePickDirectoryRequest,
 } from '@rx-artemis/protocol';
 
-import { checkWorkingDirectory, describeWorkspace } from '@rx-artemis/core';
+import { checkWorkingDirectory, createWorktree, describeWorkspace } from '@rx-artemis/core';
 
 import {
   addMemoryBank,
@@ -201,6 +201,7 @@ import {
   validateUpdatesRestart,
   validateUpdatesState,
   validateWindowRequest,
+  validateWorkspaceCreateWorktree,
   validateWorkspaceDescribe,
   validateWorkspacePickDirectory,
 } from './validate.js';
@@ -558,6 +559,25 @@ export function registerIpcHandlers(options: IpcLayerOptions): IpcLayer {
     [IPC.workspaceDescribe]: {
       validate: validateWorkspaceDescribe,
       handle: async (request) => describeWorkspace(request.path),
+    },
+
+    /**
+     * Split a worktree off the repository a directory is in.
+     *
+     * The neighbour above is a read; this writes, and runs `git` to do it, so
+     * a failure here is something the user has to be told about rather than a
+     * label that quietly falls back to a directory name. `createWorktree`
+     * answers rather than throws — see its own docs for why every failure a
+     * user can cause is a sentence — and this turns that answer into the
+     * channel's, so the renderer's one error path covers both.
+     */
+    [IPC.workspaceCreateWorktree]: {
+      validate: validateWorkspaceCreateWorktree,
+      handle: async (request) => {
+        const result = await createWorktree(request.path, request.branch);
+        if (!result.ok) throw new WorkspaceError(result.message);
+        return { path: result.path, branch: result.branch };
+      },
     },
 
     /* ---------------------------------------------------------------- */

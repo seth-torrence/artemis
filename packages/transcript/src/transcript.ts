@@ -43,6 +43,8 @@ import type {
   ToolEndStatus,
   UsageSnapshot,
 } from '@rx-artemis/protocol';
+import { SUGGESTED_TASK_TOOL } from '@rx-artemis/protocol';
+
 import { classifyTool, type ActivityCounts, type ToolCategory } from './tools.js';
 
 /* -------------------------------------------------------------------------- */
@@ -350,6 +352,23 @@ export function isGroupId(id: string): boolean {
  * folded. See {@link ActivityGroup} for why that is worth a rule of its own.
  */
 export type ArtifactTest = (item: ToolItem) => boolean;
+
+/**
+ * Is this row the agent offering the reader a piece of follow-up work?
+ *
+ * Imported rather than injected, unlike {@link ArtifactTest}, because there is
+ * nothing about it to configure: a suggested task is a call to one tool with
+ * one name, and the name is a constant in `@rx-artemis/protocol` precisely so
+ * that every reader of a stored transcript agrees about which calls these are.
+ *
+ * Answered from `name` alone, and deliberately not from whether the arguments
+ * parse. A call the model got wrong is still an offer it made, and the row that
+ * draws it can say so; folding a malformed one back into the activity marker
+ * would hide the mistake in the one place nobody opens.
+ */
+export function isSuggestedTaskCall(item: TranscriptItem | undefined): item is ToolItem {
+  return item?.kind === 'tool' && item.name === SUGGESTED_TASK_TOOL;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Scheduling                                                                 */
@@ -1331,6 +1350,12 @@ export class TranscriptModel {
      * every tile at the foot of the conversation with each new paragraph
      * arriving above the lot; see {@link ActivityGroup}.
      *
+     * Nor does a suggested task, for a third reason again: it is not something
+     * the agent did at all, it is something it is offering the reader. Folding
+     * an offer into "Ran 36 commands" would file a question as a report of
+     * work, behind a fold, where nobody answers it. See
+     * {@link isSuggestedTaskCall}.
+     *
      * A run's boundary is its `run-end` row — or, in a session read back from
      * disk, the next thing the user said, because stored history has no
      * `run-end` in it at all. The tail after the last boundary is the run in
@@ -1357,7 +1382,12 @@ export class TranscriptModel {
       if (id === undefined) continue;
 
       if (this.isMachinery(id)) {
-        if (this.isArtifact(id)) {
+        // Asked before the artifact test, and not after it: an offer is never a
+        // document, whatever a host's injected predicate says about the call
+        // that carried it. See {@link isSuggestedTaskCall}.
+        if (isSuggestedTaskCall(this.items.get(id))) {
+          rows.push(id);
+        } else if (this.isArtifact(id)) {
           artifacts.push(id);
           rows.push(id);
         } else {

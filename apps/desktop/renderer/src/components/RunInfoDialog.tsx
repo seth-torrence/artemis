@@ -24,7 +24,8 @@ import { CheckIcon, XIcon } from 'lucide-react';
 import type { Capabilities } from '@rx-artemis/protocol';
 
 import { CAPABILITY_LABELS, type CapabilityKey } from '../hooks/useCapability';
-import { contextRatio, formatDuration, formatTokens, formatUsd } from '@rx-artemis/transcript';
+import { formatDuration, formatTokens, formatUsd } from '@rx-artemis/transcript';
+import { useContextReading } from '../hooks/useContextReading';
 import { shortenPath } from '../lib/paths';
 import {
   activeCapabilities,
@@ -61,8 +62,9 @@ const CAPABILITY_NOTES: readonly (readonly [CapabilityKey, string])[] = [
   ['rewind', 'Gates the rewind control under a settled user turn.'],
   ['listSessions', 'Gates the session list and the reload command.'],
   ['subagents', 'Rendering only: tool rows may be attributed to a subagent.'],
-  ['usageReporting', 'Gates the context readout in the status line.'],
+  ['usageReporting', 'Gates the token counts in this dialog.'],
   ['costReporting', 'Whether a price is shown beside the context readout.'],
+  ['contextReporting', 'Gates the context gauge in the status line and below.'],
 ];
 
 const STATUS_TONE: Record<string, Tone> = {
@@ -257,7 +259,6 @@ function UsageBlock(): ReactElement {
   }
   if (!usage) return <p className="py-1 text-2xs text-ink-faint">No usage reported yet.</p>;
 
-  const ratio = contextRatio(usage);
   return (
     <>
       <Row label="scope">{usage.scope}</Row>
@@ -276,30 +277,55 @@ function UsageBlock(): ReactElement {
           <span className="text-ink-faint">not reported</span>
         )}
       </Row>
-      {ratio === undefined ? null : (
-        <div className="mt-1.5">
-          <div className="flex items-baseline justify-between">
-            <span className="text-2xs text-ink-faint">context</span>
-            <span className="font-mono text-2xs text-ink-muted">
-              {formatTokens(usage.contextTokens)} / {formatTokens(usage.contextWindow)}
-            </span>
-          </div>
+      <ContextRow />
+    </>
+  );
+}
+
+/**
+ * The context reading, from the same source the status line reads.
+ *
+ * It used to be computed here out of `usage.contextTokens / usage.contextWindow`
+ * alone, which made this dialog quietly disagree with the meter twelve pixels
+ * below it: the meter falls back to the window this model reported on an
+ * earlier run, and this did not — so mid-turn, before the provider had restated
+ * the size, the bar on the status line had a scale and the "run details" answer
+ * for the very same run showed nothing at all. One reading, one hook.
+ *
+ * The unknown-window case is drawn as *no bar* rather than an empty one. An
+ * empty bar is a claim about a proportion, and the whole point of that state is
+ * that the proportion is not known — only the numerator is, and it is printed.
+ */
+function ContextRow(): ReactElement | null {
+  const { reporting, tokens, utilization, label } = useContextReading();
+  if (!reporting || tokens === undefined) return null;
+
+  return (
+    <div className="mt-1.5">
+      <div className="flex items-baseline justify-between">
+        <span className="text-2xs text-ink-faint">context</span>
+        <span className="font-mono text-2xs text-ink-muted">{label}</span>
+      </div>
+      {utilization === null ? (
+        <p className="mt-1 text-2xs text-ink-faint">
+          The provider did not say how large the window is, so there is no scale to draw.
+        </p>
+      ) : (
+        <div
+          role="progressbar"
+          aria-label="Context window used"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(utilization)}
+          className="mt-1 h-1 overflow-hidden rounded-full bg-line"
+        >
           <div
-            role="progressbar"
-            aria-label="Context window used"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(ratio * 100)}
-            className="mt-1 h-1 overflow-hidden rounded-full bg-line"
-          >
-            <div
-              className={cn('h-full rounded-full', ratio > 0.85 ? 'bg-signal' : 'bg-cyan')}
-              style={{ width: `${Math.round(ratio * 100)}%` }}
-            />
-          </div>
+            className={cn('h-full rounded-full', utilization > 85 ? 'bg-signal' : 'bg-cyan')}
+            style={{ width: `${Math.round(utilization)}%` }}
+          />
         </div>
       )}
-    </>
+    </div>
   );
 }
 

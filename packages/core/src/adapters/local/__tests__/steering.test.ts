@@ -299,6 +299,19 @@ async function serveInference(
   const requests: ChatMessage[][] = [];
   let index = 0;
   const server = createServer((request: IncomingMessage, response) => {
+    /*
+     * A run also probes for the size of the context window — `/props`, then
+     * `/v1/models`. Answering those here with the next scripted turn would eat
+     * a reply this file's tests are counting, and a `GET` with no body would
+     * reach the `JSON.parse` below. 404 is what a server that does not expose
+     * them does, and the reading degrades to "unknown"; none of these tests are
+     * about the window. Same guard, same reason, as `sessions.test.ts`.
+     */
+    if (request.url !== '/v1/chat/completions') {
+      request.resume();
+      response.writeHead(404, { 'content-type': 'application/json' }).end('{}');
+      return;
+    }
     const chunks: Buffer[] = [];
     request.on('data', (chunk: Buffer) => chunks.push(chunk));
     request.on('end', () => {
