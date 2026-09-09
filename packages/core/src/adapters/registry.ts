@@ -38,6 +38,7 @@ import { createCodexAdapter } from './codex.js';
 import type { CodexAdapterOptions } from './codex.js';
 import { createOpencodeAdapter } from './opencode.js';
 import { createLocalAdapter, LLAMA_CPP, LM_STUDIO, OLLAMA } from './local/adapter.js';
+import type { LocalAdapterOptions } from './local/adapter.js';
 import type { OpencodeAdapterOptions } from './opencode.js';
 import { adapterError } from './types.js';
 import type {
@@ -238,6 +239,14 @@ export interface DefaultProviderRegistryOptions {
   readonly codex?: CodexAdapterOptions;
   /** Forwarded to the OpenCode adapter. */
   readonly opencode?: OpencodeAdapterOptions;
+  /**
+   * Forwarded to all three local adapters.
+   *
+   * One field for three rows, because the three differ only in how you ask a
+   * server what models it has — the loop, the tools and therefore the tool
+   * servers are the same file. See `local/adapter.ts`.
+   */
+  readonly local?: LocalAdapterOptions;
 }
 
 /**
@@ -258,9 +267,9 @@ export function createDefaultProviderRegistry(
     createOpencodeAdapter(options?.opencode),
     // Three rows, one adapter. They differ in how you ask what models exist,
     // not in how a turn runs — see `local/adapter.ts`.
-    createLocalAdapter(LM_STUDIO),
-    createLocalAdapter(OLLAMA),
-    createLocalAdapter(LLAMA_CPP),
+    createLocalAdapter(LM_STUDIO, options?.local),
+    createLocalAdapter(OLLAMA, options?.local),
+    createLocalAdapter(LLAMA_CPP, options?.local),
     // And the endpoint that is another Artemis — its own adapter, because the
     // remote end runs the whole agent turn. See `artemis/adapter.ts`.
     createArtemisAdapter(),

@@ -30,6 +30,7 @@
  * hosted provider is, here, a server either answering or not.
  */
 
+import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentError,
   AgentEvent,
@@ -39,6 +40,7 @@ import type {
   PermissionRequestId,
   ProviderId,
   RunId,
+  RunInput,
   RunStatus,
   SessionId,
   UsageSnapshot,
@@ -89,6 +91,8 @@ import { parseNativeCatalogue, parseOpenAiCatalogue } from '../lmstudio/catalogu
 import { readEventLine, splitEvents, ToolCallAccumulator } from './stream.js';
 import { runAgentLoop } from './loop.js';
 import type { ChatMessage, CompletionResult } from './loop.js';
+import { connectToolServers } from './mcp.js';
+import type { ConnectedToolServers } from './mcp.js';
 import { toolsForRisk, toWireTools } from './tools.js';
 import type { ToolSpec } from './tools.js';
 import { describeConfinement, resolveSandbox, wrapCommand } from './commandSandbox.js';
@@ -217,6 +221,33 @@ export const LOCAL_CAPABILITIES: Capabilities = {
    */
   permissionModes: ['plan', 'default', 'acceptEdits', 'bypassPermissions'],
 };
+
+/**
+ * What the host can hand this adapter that it could not build itself.
+ *
+ * One field, and it is the same field the Claude adapter has — see
+ * {@link import('../claude.js').ClaudeAdapterOptions.agentToolServers}. The
+ * asymmetry that used to exist here was not a decision: `packages/core` may not
+ * import Electron, so the browser tools are built in `apps/desktop/main` and
+ * injected, and only the Claude adapter had somewhere to inject them *into*.
+ * Now that this provider has an MCP client of its own (`mcp.ts`), the same
+ * factory serves both, and a run against a local model gets
+ * `mcp__artemisBrowser__browser_read` under the name a Claude run knows it by.
+ */
+export interface LocalAdapterOptions {
+  /**
+   * Extra tool servers to give a run, built per run by the host.
+   *
+   * Per **run**, not per adapter, for the reason the Claude seam is: the
+   * factory closes over the run id, so a tool acts on *this* conversation's
+   * browser and the model has no way to name another. The run input rides
+   * along because which servers a run should get is the input's to say.
+   */
+  readonly agentToolServers?: (
+    runId: RunId,
+    input: RunInput,
+  ) => Record<string, McpServerConfig> | undefined;
+}
 
 /** No account to sign in to. See the module header. */
 function localCredentials(): ProviderCredentialSpec {
@@ -353,12 +384,22 @@ class LocalRun implements Run {
   readonly #abort = new AbortController();
   readonly #input: ResolvedRunInput;
   readonly #flavour: LocalFlavour;
+  readonly #options: LocalAdapterOptions;
+  /**
+   * The tool servers this run reached, once it has reached them.
+   *
+   * Opened once per run rather than per turn, exactly as the Claude adapter
+   * builds its servers once per launch: the connections hold the handlers, and
+   * a second set mid-conversation would be a second browser for one dock.
+   */
+  #servers: ConnectedToolServers | undefined;
 
-  constructor(input: ResolvedRunInput, flavour: LocalFlavour) {
+  constructor(input: ResolvedRunInput, flavour: LocalFlavour, options: LocalAdapterOptions = {}) {
     this.runId = input.runId;
     this.providerId = flavour.id;
     this.#input = input;
     this.#flavour = flavour;
+    this.#options = options;
     this.#sessionId = input.resumeSessionId ?? (randomUUID() as SessionId);
     /*
      * Stopping a run must not be able to leave it stopped *and* waiting.
@@ -422,8 +463,21 @@ class LocalRun implements Run {
    */
   #toolsForMode(): readonly ToolSpec[] {
     const mode = this.#input.permissionMode ?? 'default';
-    if (mode === 'plan') return toolsForRisk(false, false);
-    return toolsForRisk(true, true);
+    /*
+     * The servers' tools go through the same filter as Artemis's own.
+     *
+     * A tool server's tools are tools, so `plan` withholds the ones that change
+     * something there too — which for a server means everything that did not
+     * declare `readOnlyHint`. That is the conservative reading and the right
+     * one: plan mode's promise is that nothing happened, and a promise that
+     * covered only the four tools in this package would be a promise about the
+     * wrong thing the moment a GitHub server was configured.
+     */
+    const built = mode === 'plan' ? toolsForRisk(false, false) : toolsForRisk(true, true);
+    const fromServers = (this.#servers?.tools ?? []).filter(
+      (tool) => mode !== 'plan' || tool.risk === 'read',
+    );
+    return [...built, ...fromServers];
   }
 
   /**
@@ -432,6 +486,13 @@ class LocalRun implements Run {
    * `acceptEdits` and `bypassPermissions` skip the prompt. Neither widens the
    * OS sandbox: approval and confinement are separate axes, and a mode that
    * quietly did both would make "stop asking me" mean "and also let it out".
+   *
+   * `acceptEdits` does not cover a tool server, and that is deliberate. The
+   * mode's bargain is that the edits it stops asking about are edits to this
+   * working directory, which the user is looking at and git can undo. A server
+   * acts somewhere else — a repository, a vault, a live page — so its calls
+   * keep asking, and only `bypassPermissions` silences them. See
+   * {@link ToolSpec.server}.
    */
   async #approve(call: ToolCall, tool: ToolSpec): Promise<'allow' | 'deny'> {
     // Nothing more is run once the user has stopped the turn, and nothing more
@@ -441,7 +502,7 @@ class LocalRun implements Run {
 
     const mode = this.#input.permissionMode ?? 'default';
     if (mode === 'bypassPermissions') return 'allow';
-    if (mode === 'acceptEdits' && tool.risk !== 'execute') return 'allow';
+    if (mode === 'acceptEdits' && tool.risk !== 'execute' && tool.server === undefined) return 'allow';
 
     const requestId = `${this.runId}-perm-${this.#permissionSeq++}` as PermissionRequestId;
     let input: Record<string, unknown> = {};
@@ -656,8 +717,58 @@ class LocalRun implements Run {
     ];
   }
 
+  /**
+   * Artemis's own words in the transcript, marked as Artemis's.
+   *
+   * There is no notice event in the protocol, so it goes where an adapter's own
+   * words go: a synthetic assistant block, which the transcript renders and
+   * nothing mistakes for the model's. Not persisted — this is news about *this*
+   * run's setup, and a replayed transcript claiming a server was unreachable
+   * six weeks ago would be worse than saying nothing.
+   */
+  #notice(text: string): void {
+    this.#emit({
+      type: 'text.complete',
+      messageId: `${this.runId}-notice-${this.#messageSeq++}` as MessageId,
+      role: 'assistant',
+      text,
+      synthetic: true,
+    } as never);
+  }
+
+  /**
+   * Open this run's tool servers, if it was given any.
+   *
+   * Before `session.started`, because that event names the run's tools and a
+   * list that grew afterwards would be a list the user could not trust. Bounded
+   * by the connect timeout in `mcp.ts`, and never fatal: a server that will not
+   * start is said out loud and the run continues with the tools it does have.
+   */
+  async #openToolServers(): Promise<void> {
+    const configured = this.#options.agentToolServers?.(this.runId, this.#input);
+    if (configured === undefined || Object.keys(configured).length === 0) return;
+
+    const connected = await connectToolServers(configured, {
+      // The run's own bundle rather than the shell's scrubbed one: Artemis
+      // spawns these, the model does not. See the header of `mcp.ts`.
+      env: this.#input.env,
+      cwd: this.#input.cwd,
+      signal: this.#abort.signal,
+    });
+    this.#servers = connected;
+
+    for (const problem of connected.problems) {
+      this.#notice(`The "${problem.server}" tool server is not available: ${problem.detail}`);
+    }
+  }
+
   async #drive(): Promise<void> {
     try {
+      // Before the session is announced, and inside the try: a failure here is
+      // an ordinary run-ending error with an ordinary `run.end`, not a promise
+      // rejection escaping a fire-and-forget call in the constructor.
+      await this.#openToolServers();
+
       this.#emit({
         type: 'session.started',
         sessionId: this.#sessionId,
@@ -724,6 +835,15 @@ class LocalRun implements Run {
           env: sandboxEnv(this.#input.env, []),
           signal: this.#abort.signal,
           shell: (command, signal) => this.#shell(command, signal),
+          // Only when there is something to call. Absent, `executeTool` keeps
+          // answering "no tool called that exists", which on a run with no
+          // servers is exactly true.
+          ...(this.#servers === undefined
+            ? {}
+            : {
+                callServerTool: (name, args, signal) =>
+                  (this.#servers as ConnectedToolServers).call(name, args, signal),
+              }),
         },
         approve: (call, tool) => this.#approve(call, tool),
         onToolStart: (call) => {
@@ -787,6 +907,10 @@ class LocalRun implements Run {
       // listener has already done this; a run that ended some other way with a
       // prompt still open has not.
       this.#refuseAllPending();
+      // Every connection this run opened, closed with it. A stdio server is a
+      // child process: leaving one behind would leak one per run, and the run
+      // that leaked it is the one that can name it.
+      if (this.#servers !== undefined) await this.#servers.close();
       if (this.#scratch !== undefined) void rm(this.#scratch, { recursive: true, force: true });
       this.#queue.close();
     }
@@ -863,7 +987,10 @@ async function hasBinary(binary: string): Promise<boolean> {
 }
 
 /** Build the adapter for one local server. */
-export function createLocalAdapter(flavour: LocalFlavour): ProviderAdapter {
+export function createLocalAdapter(
+  flavour: LocalFlavour,
+  options?: LocalAdapterOptions,
+): ProviderAdapter {
   return {
     id: flavour.id,
     label: flavour.label,
@@ -1058,7 +1185,7 @@ export function createLocalAdapter(flavour: LocalFlavour): ProviderAdapter {
           ),
         );
       }
-      return Promise.resolve(new LocalRun(input, flavour));
+      return Promise.resolve(new LocalRun(input, flavour, options ?? {}));
     },
   } as ProviderAdapter;
 }

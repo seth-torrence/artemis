@@ -778,6 +778,19 @@ function createEngine(options: EngineOptions): ArtemisEngine {
         }
       },
     },
+    /*
+     * The same factory, handed to the provider whose loop is Artemis's own.
+     *
+     * The one call, not a second one built for the occasion: which browser a
+     * run gets is decided once, in `agentBrowserServers`, and a local run that
+     * asked the question separately would eventually answer it differently.
+     * `local/mcp.ts` is the client that reaches what comes back.
+     */
+    local: {
+      ...(options.agentToolServers === undefined
+        ? {}
+        : { agentToolServers: options.agentToolServers }),
+    },
   });
 
   /**

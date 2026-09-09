@@ -17,6 +17,15 @@
  * Seatbelt does the work instead. The distinction is why {@link ToolSpec}
  * carries `needsOsSandbox` rather than treating every tool the same.
  *
+ * There is now a third kind, and it belongs to neither column: a **tool server**
+ * performs its own work in its own process (see `mcp.ts`). Artemis is a client
+ * there — it can decline to call, and that is the whole of its power — so those
+ * tools carry `needsOsSandbox: false` because there is nothing here to wrap,
+ * and `server` because the approval prompt should say whose tool it is. They
+ * are not in {@link ALL_TOOLS}: the list below is what Artemis implements, and
+ * what a run is offered is that list plus whatever its servers turned out to
+ * hold.
+ *
  * ## Risk is declared, not inferred
  *
  * Each tool says whether it changes anything. That drives approval: reading is
@@ -52,9 +61,21 @@ export interface ToolSpec {
   readonly risk: ToolRisk;
   /**
    * True when `confine` cannot defend this tool and the operating system must.
-   * Only the shell.
+   * Only the shell — see the module header for why a tool server is not this.
    */
   readonly needsOsSandbox: boolean;
+  /**
+   * The tool server that performs this tool, when Artemis does not.
+   *
+   * Absent on everything in {@link ALL_TOOLS}. Present, and load-bearing, on
+   * everything `mcp.ts` discovered: it names the server in the approval prompt,
+   * routes the call in {@link executeTool}, and keeps `acceptEdits` from
+   * standing in for an answer the user has not given. "Stop asking me about
+   * edits" is a statement about this working directory, and a tool server's
+   * work is somewhere else — a repository, a vault, a live browser — where the
+   * user's next click cannot undo it.
+   */
+  readonly server?: string;
 }
 
 /** Everything a tool needs to do its job. */
@@ -80,6 +101,19 @@ export interface ToolContext {
    * call site, where the approval policy can see it.
    */
   readonly shell: (command: string, signal: AbortSignal) => Promise<ToolResult>;
+  /**
+   * Call a tool one of this run's tool servers performs.
+   *
+   * Injected for the same reason {@link shell} is: the connections belong to
+   * the run, and a module that opened them itself would open a set per tool
+   * call. Absent on a run with no servers configured, which is what keeps the
+   * "no tool called that exists" answer below the truth rather than a guess.
+   */
+  readonly callServerTool?: (
+    name: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+  ) => Promise<ToolResult>;
 }
 
 /** What a tool hands back to the model. */
@@ -267,6 +301,12 @@ export async function executeTool(
       case SHELL.name:
         return await context.shell(requireString(args, 'command'), context.signal);
       default:
+        // Not a tool Artemis implements. It may still be one a server does —
+        // and the server is the only thing that can say so, which is why the
+        // fallback is a call rather than a lookup here.
+        if (context.callServerTool !== undefined) {
+          return await context.callServerTool(name, args, context.signal);
+        }
         return { output: `No tool called "${name}" exists.`, failed: true };
     }
   } catch (error) {
