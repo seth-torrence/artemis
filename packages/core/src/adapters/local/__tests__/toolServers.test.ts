@@ -106,6 +106,18 @@ async function serveInference(turns: readonly (readonly unknown[])[]): Promise<I
         response.end(JSON.stringify({ data: [{ id: 'qwen', object: 'model' }] }));
         return;
       }
+      /*
+       * The context probe asks `/props` before it asks `/v1/models`, and a
+       * `GET` carries no body — which reached the `JSON.parse` below and threw
+       * where nothing was waiting to catch it. 404 is what a server without
+       * those endpoints answers, and the window reading degrades to "unknown";
+       * nothing in this file is about the window. Same guard, same reason, as
+       * `sessions.test.ts` and `steering.test.ts`.
+       */
+      if (request.url !== '/v1/chat/completions') {
+        response.writeHead(404, { 'content-type': 'application/json' }).end('{}');
+        return;
+      }
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
         tools?: { function: { name: string } }[];
       };
