@@ -60,6 +60,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import { composeProviderEnv } from '../env.js';
 import { AsyncQueue, createDeferred } from '../stream.js';
 import type { Deferred } from '../stream.js';
 
@@ -91,7 +92,7 @@ import { parseNativeCatalogue, parseOpenAiCatalogue } from '../lmstudio/catalogu
 import { readEventLine, splitEvents, ToolCallAccumulator } from './stream.js';
 import { runAgentLoop } from './loop.js';
 import type { ChatMessage, CompletionResult } from './loop.js';
-import { connectToolServers } from './mcp.js';
+import { connectToolServers, mergeToolServers } from './mcp.js';
 import type { ConnectedToolServers } from './mcp.js';
 import { toolsForRisk, toWireTools } from './tools.js';
 import type { ToolSpec } from './tools.js';
@@ -745,13 +746,38 @@ class LocalRun implements Run {
    * start is said out loud and the run continues with the tools it does have.
    */
   async #openToolServers(): Promise<void> {
-    const configured = this.#options.agentToolServers?.(this.runId, this.#input);
-    if (configured === undefined || Object.keys(configured).length === 0) return;
+    // Two sources, one list: what the host built for this run, and what the
+    // profile records. See `mergeToolServers` for who wins a name.
+    const merged = mergeToolServers(
+      this.#options.agentToolServers?.(this.runId, this.#input),
+      this.#input.toolServers,
+    );
+    for (const problem of merged.problems) {
+      this.#notice(`The "${problem.server}" tool server was not used: ${problem.detail}`);
+    }
+    if (Object.keys(merged.servers).length === 0) return;
 
-    const connected = await connectToolServers(configured, {
-      // The run's own bundle rather than the shell's scrubbed one: Artemis
-      // spawns these, the model does not. See the header of `mcp.ts`.
-      env: this.#input.env,
+    const connected = await connectToolServers(merged.servers, {
+      /*
+       * The host environment under the profile's, unscrubbed.
+       *
+       * Not the environment `shell` gets, and the difference is the point. The
+       * shell's is stripped of anything credential-shaped because the *model*
+       * writes the command that reads it. A tool server is named by the user in
+       * settings and spawned by Artemis; the model never sees its environment
+       * and cannot influence what it does with one. Stripping it here would
+       * mean a GitHub server could never hold a token, which is the whole
+       * reason for configuring one.
+       *
+       * It is also why the docs say to name only servers you would run
+       * yourself: this is the user's own environment, handed to the user's own
+       * choice of program.
+       */
+      env: composeProviderEnv(this.#input.env, {
+        ...(this.#input.inheritHostEnv === undefined
+          ? {}
+          : { inheritHostEnv: this.#input.inheritHostEnv }),
+      }),
       cwd: this.#input.cwd,
       signal: this.#abort.signal,
     });

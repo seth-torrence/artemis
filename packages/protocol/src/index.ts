@@ -55,6 +55,7 @@ export * from './attachment.js';
 export * from './run.js';
 export * from './session.js';
 export * from './profile.js';
+export * from './toolServer.js';
 export * from './terminal.js';
 export * from './browser.js';
 export * from './openai.js';

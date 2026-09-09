@@ -23,7 +23,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentEvent, PermissionRequestId } from '@rx-artemis/protocol';
+import type { AgentEvent, PermissionRequestId, ToolServerConfig } from '@rx-artemis/protocol';
 
 import { BASE_URL_ENV, createLocalAdapter, LLAMA_CPP } from '../adapter.js';
 import type { ResolvedRunInput, Run } from '../../types.js';
@@ -302,5 +302,110 @@ describe('a run with no servers', () => {
     const started = events.find((event) => event.type === 'session.started') as { tools: string[] };
     expect(started.tools).toEqual(['read_file', 'write_file', 'list_files', 'search', 'shell']);
     expect(inference.offered[0]).toEqual(['read_file', 'write_file', 'list_files', 'search', 'shell']);
+  });
+});
+
+describe('a server the profile configured', () => {
+  /** A plain JSON-RPC-over-POST MCP endpoint, as a user's own server would be. */
+  async function serveMcpOverHttp(): Promise<{ url: string; authorization: () => string | undefined }> {
+    let seen: string | undefined;
+    const server = createServer((request: IncomingMessage, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        seen = request.headers.authorization;
+        const raw = Buffer.concat(chunks).toString('utf8');
+        // The client opens a stream with GET and closes the session with
+        // DELETE. Neither carries a body, and neither is needed here.
+        if (request.method !== 'POST' || raw === '') {
+          response.writeHead(405).end();
+          return;
+        }
+        const message = JSON.parse(raw) as {
+          id?: number;
+          method: string;
+          params?: { protocolVersion?: string };
+        };
+        if (message.id === undefined) {
+          response.writeHead(202).end();
+          return;
+        }
+        let result: unknown = {};
+        if (message.method === 'initialize') {
+          result = {
+            protocolVersion: message.params?.protocolVersion,
+            capabilities: { tools: {} },
+            serverInfo: { name: 'forgejo', version: '1' },
+          };
+        } else if (message.method === 'tools/list') {
+          result = {
+            tools: [
+              {
+                name: 'list_repos',
+                description: 'List repositories.',
+                inputSchema: { type: 'object', properties: {} },
+                annotations: { readOnlyHint: true },
+              },
+            ],
+          };
+        } else if (message.method === 'tools/call') {
+          result = { content: [{ type: 'text', text: 'artemis, cortex' }] };
+        }
+        response
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+      });
+    });
+    httpServers.push(server);
+    await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+    const { port } = server.address() as AddressInfo;
+    return { url: `http://127.0.0.1:${String(port)}/mcp`, authorization: () => seen };
+  }
+
+  const forgejo = (url: string): ToolServerConfig => ({
+    name: 'forgejo',
+    transport: 'http',
+    url,
+    headers: { authorization: 'Bearer ${FORGEJO_TOKEN}' },
+  });
+
+  it('reaches it, expanding ${NAME} from the run’s environment', async () => {
+    const mcp = await serveMcpOverHttp();
+    const inference = await serveInference([
+      [toolCallChunk('mcp__forgejo__list_repos', {})],
+      [textChunk('You have two repositories.')],
+    ]);
+    const adapter = createLocalAdapter(LLAMA_CPP);
+
+    const run = await adapter.createRun(
+      runInput(inference.origin, {
+        toolServers: [forgejo(mcp.url)],
+        // Set on the run's bundle, which is where a profile's environment
+        // arrives. The token never appears in the profile file.
+        env: { [BASE_URL_ENV]: inference.origin, FORGEJO_TOKEN: 'tok_live' },
+      }),
+    );
+    const events = await drain(run);
+
+    expect(mcp.authorization()).toBe('Bearer tok_live');
+    expect(names(events, 'tool.end')).toEqual([
+      expect.objectContaining({ name: 'mcp__forgejo__list_repos', status: 'ok' }),
+    ]);
+  });
+
+  it('joins the host’s servers rather than replacing them', async () => {
+    const mcp = await serveMcpOverHttp();
+    const inference = await serveInference([[textChunk('ok')]]);
+    const adapter = createLocalAdapter(LLAMA_CPP, {
+      agentToolServers: () => ({ artemisBrowser: browserServer() }),
+    });
+
+    const run = await adapter.createRun(
+      runInput(inference.origin, { toolServers: [forgejo(mcp.url)] }),
+    );
+    await drain(run);
+
+    expect(inference.offered[0]).toContain('mcp__artemisBrowser__browser_read');
+    expect(inference.offered[0]).toContain('mcp__forgejo__list_repos');
   });
 });

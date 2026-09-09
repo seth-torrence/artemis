@@ -33,6 +33,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   baseUrlProblem,
+  toolServersProblem,
   isCredentialRoutingEnvKey,
   isLocalProviderId,
   isProviderId,
@@ -48,6 +49,7 @@ import type {
   ProfileMetadata,
   ProfilePatch,
   ProviderId,
+  ToolServerConfig,
 } from '@rx-artemis/protocol';
 
 import { ProfileError } from './errors.js';
@@ -347,6 +349,11 @@ export class ProfileStore {
         // server and not, so saving the profile without it would hand back a
         // profile that cannot work and no reason why.
         baseUrl: isLocalProviderId(draft.providerId) ? assertBaseUrl(draft.baseUrl) : undefined,
+        // Refused rather than dropped, on the same reasoning as the address: a
+        // server entry that does not parse is a tool the model will be told it
+        // has and cannot use, and finding that out mid-turn is worse than
+        // finding it out at the save button.
+        toolServers: assertToolServers(draft.toolServers),
         // Only the opt-out is written. Both fields default to the ordinary
         // state when absent, so storing the default would fill every record
         // with a line that says nothing — and would make a profile written by
@@ -398,6 +405,13 @@ export class ProfileStore {
           patch.baseUrl === undefined || !isLocalProviderId(current.providerId)
             ? current.baseUrl
             : assertBaseUrl(patch.baseUrl),
+        // Omitted leaves the list alone; an empty array keeps none. Replaced
+        // wholesale because that is what the editor does — see
+        // `ProfilePatch.toolServers`.
+        toolServers:
+          patch.toolServers === undefined
+            ? current.toolServers
+            : assertToolServers(patch.toolServers),
         color:
           patch.color === undefined
             ? current.color
@@ -715,6 +729,11 @@ function parseProfile(
      * the editor and honoured by the availability probe.
      */
     baseUrl: readBaseUrl(raw),
+    // Re-validated on the way out like the address, and for the sharper
+    // reason: this list is where a hand-edited file could name a command to
+    // spawn, so a malformed entry is dropped here rather than carried to the
+    // place that would run it.
+    toolServers: readToolServers(raw['toolServers']),
     color: normalizeProfileColor(raw['color']) ?? undefined,
     // Re-checked on the way out for the same reasons as the colour, plus one
     // of its own: the plan table changes as providers rename tiers, so a pin
@@ -790,6 +809,90 @@ function assertBaseUrl(value: string | undefined): string | undefined {
   const problem = baseUrlProblem(value);
   if (problem !== null) throw new ProfileError('invalid_request', problem);
   return normalizeBaseUrl(value);
+}
+
+/**
+ * The tool servers to store, or `undefined` for none.
+ *
+ * Refuses rather than drops, exactly as {@link assertBaseUrl} does. The check
+ * lives in the protocol so the settings form can run the same one before the
+ * request is made and put the sentence beside the field.
+ */
+function assertToolServers(
+  value: readonly ToolServerConfig[] | undefined,
+): readonly ToolServerConfig[] | undefined {
+  if (value === undefined) return undefined;
+  if (value.length === 0) return undefined;
+  const problem = toolServersProblem(value);
+  if (problem !== null) throw new ProfileError('invalid_request', problem);
+  return value.map(normalizeToolServer);
+}
+
+/**
+ * One entry, with only the fields the protocol names.
+ *
+ * Rebuilt rather than passed through, which is the rule every reader in this
+ * file follows: a record can be hand-edited, and an unreviewed field riding
+ * into the object that eventually spawns a process is exactly the shape of
+ * problem worth designing out.
+ */
+function normalizeToolServer(server: ToolServerConfig): ToolServerConfig {
+  return {
+    name: server.name,
+    transport: server.transport,
+    ...(server.enabled === false ? { enabled: false } : {}),
+    ...(server.command === undefined || server.command === '' ? {} : { command: server.command }),
+    ...(server.args === undefined || server.args.length === 0 ? {} : { args: [...server.args] }),
+    ...(server.env === undefined || Object.keys(server.env).length === 0
+      ? {}
+      : { env: { ...server.env } }),
+    ...(server.url === undefined || server.url === '' ? {} : { url: server.url }),
+    ...(server.headers === undefined || Object.keys(server.headers).length === 0
+      ? {}
+      : { headers: { ...server.headers } }),
+    ...(server.timeoutMs === undefined ? {} : { timeoutMs: server.timeoutMs }),
+  };
+}
+
+/**
+ * A stored list, as far as it can be believed.
+ *
+ * Anything malformed becomes no list at all rather than a partial one: half a
+ * tool-server config is a run whose tools depend on which half survived, and a
+ * profile that reports none is a state the user can see and fix.
+ */
+function readToolServers(raw: unknown): readonly ToolServerConfig[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const servers: ToolServerConfig[] = [];
+  for (const entry of raw as unknown[]) {
+    if (typeof entry !== 'object' || entry === null) return undefined;
+    const record = entry as Record<string, unknown>;
+    const name = record['name'];
+    const transport = record['transport'];
+    if (typeof name !== 'string') return undefined;
+    if (transport !== 'stdio' && transport !== 'http' && transport !== 'sse') return undefined;
+    servers.push(
+      normalizeToolServer({
+        name,
+        transport,
+        ...(record['enabled'] === false ? { enabled: false } : {}),
+        ...(typeof record['command'] === 'string' ? { command: record['command'] } : {}),
+        ...(Array.isArray(record['args'])
+          ? { args: (record['args'] as unknown[]).filter((a): a is string => typeof a === 'string') }
+          : {}),
+        ...(isStringMap(record['env']) ? { env: record['env'] } : {}),
+        ...(typeof record['url'] === 'string' ? { url: record['url'] } : {}),
+        ...(isStringMap(record['headers']) ? { headers: record['headers'] } : {}),
+        ...(typeof record['timeoutMs'] === 'number' ? { timeoutMs: record['timeoutMs'] } : {}),
+      }),
+    );
+  }
+  return toolServersProblem(servers) === null ? servers : undefined;
+}
+
+function isStringMap(value: unknown): value is Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => typeof entry === 'string');
 }
 
 /** Where a stored profile's address lives now, and where it used to. */

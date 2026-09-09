@@ -17,8 +17,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import type { ToolServerConfig } from '@rx-artemis/protocol';
 
-import { connectToolServers, expandEnvRefs, qualifiedToolName, resultText } from '../mcp.js';
+import {
+  connectToolServers,
+  expandEnvRefs,
+  mergeToolServers,
+  qualifiedToolName,
+  resultText,
+} from '../mcp.js';
 
 /** One tool a test server offers, and what it answers. */
 interface FakeTool {
@@ -101,11 +108,14 @@ async function serveOverHttp(
     request.on('data', (chunk: Buffer) => chunks.push(chunk));
     request.on('end', () => {
       headers.push({ authorization: request.headers.authorization });
-      if (request.method !== 'POST') {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      // The client opens a stream with GET and closes the session with DELETE.
+      // Neither carries a body, and neither is needed here.
+      if (request.method !== 'POST' || raw === '') {
         response.writeHead(405).end();
         return;
       }
-      const message = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+      const message = JSON.parse(raw) as {
         id?: number;
         method: string;
         params?: { name?: string; arguments?: unknown; protocolVersion?: string };
@@ -386,5 +396,62 @@ describe('results the model cannot be shown', () => {
 
   it('says so plainly for a genuinely empty result', () => {
     expect(resultText({ content: [] })).toBe('The tool returned no output.');
+  });
+});
+
+describe('merging the host’s servers with the profile’s', () => {
+  const profileServer = (over: Partial<ToolServerConfig> = {}): ToolServerConfig => ({
+    name: 'github',
+    transport: 'http',
+    url: 'https://api.github.com/mcp',
+    ...over,
+  });
+
+  it('translates a profile entry into the shape the host’s arrive in', () => {
+    const { servers, problems } = mergeToolServers(undefined, [
+      profileServer({ headers: { Authorization: 'Bearer ${T}' }, timeoutMs: 5_000 }),
+    ]);
+
+    expect(problems).toEqual([]);
+    expect(servers['github']).toEqual({
+      type: 'http',
+      url: 'https://api.github.com/mcp',
+      headers: { Authorization: 'Bearer ${T}' },
+      timeout: 5_000,
+    });
+  });
+
+  it('translates a stdio entry with its arguments and environment', () => {
+    const { servers } = mergeToolServers(undefined, [
+      { name: 'cortex', transport: 'stdio', command: 'cerebro-mcp', args: ['--bank', 'cortex'] },
+    ]);
+    expect(servers['cortex']).toEqual({
+      type: 'stdio',
+      command: 'cerebro-mcp',
+      args: ['--bank', 'cortex'],
+    });
+  });
+
+  it('keeps a switched-off entry out of the run', () => {
+    const { servers } = mergeToolServers(undefined, [profileServer({ enabled: false })]);
+    expect(Object.keys(servers)).toEqual([]);
+  });
+
+  it('lets the host’s server keep its name, and says the profile entry was skipped', () => {
+    // `mcp__artemisBrowser__browser_open` is addressed by permission rules and
+    // skills. A profile entry that could take the name could take the rules.
+    const host = { artemisBrowser: inProcess('artemis-browser', [{ name: 'browser_read', answer: said('x') }]) };
+    const { servers, problems } = mergeToolServers(host, [profileServer({ name: 'artemisBrowser' })]);
+
+    expect(servers['artemisBrowser']).toBe(host.artemisBrowser);
+    expect(problems).toEqual([
+      { server: 'artemisBrowser', detail: expect.stringContaining('already provides') },
+    ]);
+  });
+
+  it('carries both through when the names do not collide', () => {
+    const host = { artemisBrowser: inProcess('artemis-browser', [{ name: 'browser_read', answer: said('x') }]) };
+    const { servers } = mergeToolServers(host, [profileServer()]);
+    expect(Object.keys(servers).sort()).toEqual(['artemisBrowser', 'github']);
   });
 });

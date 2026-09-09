@@ -66,9 +66,11 @@ import {
   defaultBaseUrlFor,
   plansForProvider,
   profileColorProblem,
+  toolServersProblem,
 } from '@rx-artemis/protocol';
 import type { AuthStatusInfo, ProfileId, ProfileMetadata, ProviderId,
-  ProviderKind, ServerAccountsListResponse, ServerSignInStatus } from '@rx-artemis/protocol';
+  ProviderKind, ServerAccountsListResponse, ServerSignInStatus,
+  ToolServerConfig } from '@rx-artemis/protocol';
 
 import { hasNativeDirectoryPicker, NO_PICKER_REASON, pickDirectory } from '../lib/extensions';
 import { shortenPath } from '../lib/paths';
@@ -1665,6 +1667,23 @@ interface FormProps {
   readonly profile?: ProfileMetadata;
 }
 
+/**
+ * What an empty tool-servers box suggests.
+ *
+ * One http server, because that is the shape a user is most likely to have an
+ * address for and the one that needs no binary installed. The full set of
+ * examples — GitHub, Forgejo, OpenBao, a cortex wrapper — is in
+ * `docs/LOCAL-MODEL-TOOLS.md`, which is where a placeholder cannot go.
+ */
+const TOOL_SERVERS_PLACEHOLDER = `[
+  {
+    "name": "forgejo",
+    "transport": "http",
+    "url": "https://git.example/api/v1/mcp",
+    "headers": { "Authorization": "Bearer \${FORGEJO_TOKEN}" }
+  }
+]`;
+
 function ProfileForm({ profile, onDone, onCancel }: FormProps): ReactElement {
   const fallbackProvider = usePane((s) => s.activeProviderId);
   const providers = useApp((s) => s.providers);
@@ -1717,6 +1736,20 @@ function ProfileForm({ profile, onDone, onCancel }: FormProps): ReactElement {
   const [autoSelect, setAutoSelect] = useState(profile?.autoSelect !== false);
   const [enabled, setEnabled] = useState(profile?.disabled !== true);
   const [envText, setEnvText] = useState('');
+  /*
+   * The tool servers, edited as the JSON they are stored as.
+   *
+   * A text box rather than a row-per-server builder, and that is a deliberate
+   * first cut. What a server needs is different per transport — a command and
+   * arguments, or a URL and headers — so a form would be three forms, and the
+   * thing a user most often does with one of these is paste it from a README.
+   * The parse and the protocol's own validator run on every save and put the
+   * sentence under the field, which is the part that actually has to be right.
+   */
+  const [toolServersText, setToolServersText] = useState(
+    profile?.toolServers === undefined ? '' : `${JSON.stringify(profile.toolServers, null, 2)}
+`,
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -1794,6 +1827,28 @@ function ProfileForm({ profile, onDone, onCancel }: FormProps): ReactElement {
     return env;
   }
 
+  /**
+   * The tool servers the box describes, or the sentence to show instead.
+   *
+   * The same {@link toolServersProblem} the IPC boundary and the profile store
+   * run, run here first — this is the only one of the three that can put the
+   * message beside the text the user is still looking at.
+   */
+  function parseToolServers(): readonly ToolServerConfig[] | string {
+    const text = toolServersText.trim();
+    if (text === '') return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (cause) {
+      return `Tool servers must be a JSON array. ${cause instanceof Error ? cause.message : ''}`.trim();
+    }
+    if (!Array.isArray(parsed)) return 'Tool servers must be a JSON array, even for a single server.';
+    const servers = parsed as ToolServerConfig[];
+    const problem = toolServersProblem(servers);
+    return problem === null ? servers : problem;
+  }
+
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
     if (busy) return;
@@ -1834,6 +1889,12 @@ function ProfileForm({ profile, onDone, onCancel }: FormProps): ReactElement {
       return;
     }
 
+    const toolServers = parseToolServers();
+    if (typeof toolServers === 'string') {
+      setError(toolServers);
+      return;
+    }
+
     setBusy(true);
     if (profile) {
       const ok = await updateProfile(profile.id, {
@@ -1863,6 +1924,10 @@ function ProfileForm({ profile, onDone, onCancel }: FormProps): ReactElement {
         // has nothing to send back.
         ...(apiKeyTouched ? { apiKey } : {}),
         ...(Object.keys(env).length > 0 ? { publicEnv: env } : {}),
+        // Always sent, the empty array included: the box holds the whole list,
+        // so an emptied box means "no tool servers" and omitting it would keep
+        // the ones the user just deleted. See `ProfilePatch.toolServers`.
+        ...(activeKind === 'local' ? { toolServers } : {}),
       });
       setBusy(false);
       if (ok) onDone(profile.id);
@@ -2201,6 +2266,38 @@ function ProfileForm({ profile, onDone, onCancel }: FormProps): ReactElement {
                 <FieldDescription className="text-2xs">
                   NAME=value per line. Credential-shaped names, and anything that decides where a
                   credential is sent, are rejected.
+                </FieldDescription>
+              </Field>
+            ) : null}
+
+            {/*
+              Local providers only, and edit only.
+
+              Only the local adapter has a tool-server client of its own — the
+              hosted providers reach MCP through the runtime Artemis wraps, and
+              offering the field for them would be a box that changes nothing.
+              Edit-only for the same reason the environment box above is: a new
+              profile is two fields and a button.
+            */}
+            {editing && activeKind === 'local' ? (
+              <Field>
+                <FieldLabel htmlFor="profile-tool-servers" className="chrome-label text-ink-faint">
+                  Tool servers (optional)
+                </FieldLabel>
+                <Textarea
+                  id="profile-tool-servers"
+                  rows={4}
+                  value={toolServersText}
+                  spellCheck={false}
+                  placeholder={TOOL_SERVERS_PLACEHOLDER}
+                  onChange={(event) => setToolServersText(event.target.value)}
+                  className="min-h-24 font-mono text-xs md:text-xs"
+                />
+                <FieldDescription className="text-2xs">
+                  A JSON array of MCP servers this profile’s runs may call, reached as
+                  <code className="px-1">mcp__name__tool</code>. Write a{' '}
+                  <code className="px-1">{'${NAME}'}</code> reference for a token and export it — a
+                  value that looks like a credential is refused, because this file is not encrypted.
                 </FieldDescription>
               </Field>
             ) : null}

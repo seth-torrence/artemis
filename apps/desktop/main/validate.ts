@@ -59,6 +59,7 @@ import {
   isProviderId,
   isSecretEnvKey,
   isValidServerPort,
+  MAX_TOOL_SERVERS,
   normalizeBaseUrl,
   normalizeWorkspace,
   MAX_SERVER_PORT,
@@ -68,6 +69,7 @@ import {
   profileColorProblem,
   profilePlanIdProblem,
   secretRefProblem,
+  toolServersProblem,
   type AgentPrompt,
   type AgentPromptScope,
   type AgentPromptsListRequest,
@@ -102,6 +104,7 @@ import {
   type PermissionRuleUpdate,
   type ProfileDraft,
   type ProfilePatch,
+  type ToolServerConfig,
   type ProfilesCreateRequest,
   type ProfilesDeleteRequest,
   type ProfilesListRequest,
@@ -614,6 +617,89 @@ function optionalPublicEnv(value: unknown, field: string): Record<string, string
   return out;
 }
 
+/**
+ * A profile's tool servers, as they arrive from the renderer.
+ *
+ * Rebuilt field by field rather than passed through, and checked again with the
+ * protocol's own {@link toolServersProblem}. Both halves matter, and for
+ * different reasons.
+ *
+ * The rebuild is because this list is the *only* thing in the IPC surface that
+ * can name an executable. A hostile or confused renderer must not be able to
+ * ride an unreviewed key into the object the local adapter eventually spawns
+ * from, and the way to guarantee that is to construct the object here out of
+ * the fields this function names.
+ *
+ * The second check is the same belt-and-braces `optionalPublicEnv` keeps: the
+ * store validates too, and neither is allowed to be the only one that does.
+ */
+function optionalToolServers(value: unknown, field: string): ToolServerConfig[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) throw new ValidationError(field, 'must be an array');
+  if (value.length > MAX_TOOL_SERVERS) {
+    throw new ValidationError(field, `must have at most ${MAX_TOOL_SERVERS} entries`);
+  }
+
+  const servers: ToolServerConfig[] = value.map((entry, index) => {
+    const where = `${field}[${String(index)}]`;
+    const raw = requireObject(entry, where);
+    const transport = raw['transport'];
+    if (transport !== 'stdio' && transport !== 'http' && transport !== 'sse') {
+      throw new ValidationError(`${where}.transport`, 'must be "stdio", "http" or "sse"');
+    }
+    return compact<ToolServerConfig>({
+      name: requireString(raw['name'], `${where}.name`, LIMITS.label),
+      transport,
+      // Only the opt-out is carried, so a stored list does not fill with lines
+      // that say nothing. Same rule as `Profile.autoSelect`.
+      enabled: raw['enabled'] === false ? false : undefined,
+      command: optionalString(raw['command'], `${where}.command`, LIMITS.path),
+      args: optionalStringArray(raw['args'], `${where}.args`, LIMITS.envEntries, LIMITS.envValue),
+      env: optionalStringMap(raw['env'], `${where}.env`),
+      url: optionalString(raw['url'], `${where}.url`, LIMITS.envValue),
+      headers: optionalStringMap(raw['headers'], `${where}.headers`),
+      timeoutMs: optionalPositiveInteger(raw['timeoutMs'], `${where}.timeoutMs`),
+    }) as ToolServerConfig;
+  });
+
+  const problem = toolServersProblem(servers);
+  if (problem !== null) throw new ValidationError(field, problem);
+  return servers;
+}
+
+/**
+ * A plain map of strings, for a tool server's headers and environment.
+ *
+ * Deliberately *not* {@link optionalPublicEnv}: that one refuses any key whose
+ * name looks like a credential, which is exactly what a header called
+ * `Authorization` is. The difference is where the value goes — `publicEnv` is
+ * written to `profiles.json` in the clear and is read by the provider CLI,
+ * whereas a tool-server value that holds a literal secret is refused by
+ * {@link toolServersProblem} and a `${NAME}` reference is not a secret at all.
+ */
+function optionalStringMap(value: unknown, field: string): Record<string, string> | undefined {
+  if (value === undefined || value === null) return undefined;
+  const source = requireObject(value, field);
+  const keys = Object.keys(source);
+  if (keys.length > LIMITS.envEntries) {
+    throw new ValidationError(field, `must have at most ${LIMITS.envEntries} entries`);
+  }
+  const out: Record<string, string> = {};
+  for (const key of keys) {
+    if (POLLUTING_KEYS.has(key)) continue;
+    out[key] = requireString(source[key], `${field}.${key}`, LIMITS.envValue);
+  }
+  return out;
+}
+
+function optionalPositiveInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new ValidationError(field, 'must be a positive number');
+  }
+  return Math.floor(value);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Permissions                                                                */
 /* -------------------------------------------------------------------------- */
@@ -795,6 +881,7 @@ function validateProfileDraft(value: unknown, field: string): ProfileDraft {
     apiKey: isLocalProviderId(providerId)
       ? optionalApiKey(draft['apiKey'], `${field}.apiKey`)
       : undefined,
+    toolServers: optionalToolServers(draft['toolServers'], `${field}.toolServers`),
     color: optionalColor(draft['color'], `${field}.color`),
     planId: optionalPlanId(draft['planId'], providerId, `${field}.planId`),
     autoSelect: optionalBoolean(draft['autoSelect'], `${field}.autoSelect`),
@@ -915,6 +1002,7 @@ function validateProfilePatch(value: unknown, field: string): ProfilePatch {
     publicEnv: optionalPublicEnv(patch['publicEnv'], `${field}.publicEnv`),
     baseUrl: optionalBaseUrl(patch['baseUrl'], `${field}.baseUrl`),
     apiKey: optionalApiKey(patch['apiKey'], `${field}.apiKey`),
+    toolServers: optionalToolServers(patch['toolServers'], `${field}.toolServers`),
     color: optionalColor(patch['color'], `${field}.color`),
     /*
       No provider to check against here, unlike the draft: a patch names only

@@ -56,6 +56,7 @@ import type {
   RunId,
   RunInput,
   SessionId,
+  ToolServerConfig,
   Unsubscribe,
 } from '@rx-artemis/protocol';
 import { isFileAttachment, isImageAttachment } from '@rx-artemis/protocol';
@@ -120,6 +121,15 @@ export interface RunResolution {
    * on. Absolute paths, so they are resolved here and never sent by a renderer.
    */
   readonly plugins?: readonly LocalPlugin[];
+  /**
+   * Tool servers this run may reach, read from the profile.
+   *
+   * Resolved here for the same reason `plugins` is: an entry can name a command
+   * to spawn, and a renderer that could send one could have any binary on the
+   * machine started under the agent's environment. What crosses the IPC
+   * boundary is the profile id; what comes back is what that profile recorded.
+   */
+  readonly toolServers?: readonly ToolServerConfig[];
   /** Cancels the run from the outside — window close, app shutdown. */
   readonly abortSignal?: AbortSignal;
 }

@@ -54,6 +54,8 @@
  */
 
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import type { ToolServerConfig } from '@rx-artemis/protocol';
+import { enabledToolServers } from '@rx-artemis/protocol';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -190,6 +192,63 @@ function expandMap(
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(map)) out[key] = expandEnvRefs(value, env);
   return out;
+}
+
+/**
+ * A profile's tool servers, in the shape the host's own arrive in.
+ *
+ * One vocabulary downstream. {@link ToolServerConfig} is what a user writes and
+ * what `profiles.json` keeps — JSON, renderer-safe, validated in the protocol;
+ * {@link McpServerConfig} is what the composition root builds and what the
+ * Claude adapter is handed. Translating at the door means everything past it
+ * connects, lists and calls without asking where a server came from, which is
+ * the only reason `artemisBrowser` and a user's GitHub server can be the same
+ * kind of thing to the loop.
+ *
+ * The host's servers win a name collision, and it is not a close call:
+ * `mcp__artemisBrowser__browser_open` is addressed by permission rules and
+ * skills, so a profile entry that could take the name could take the rules with
+ * it. The shadowed entry is reported rather than dropped in silence.
+ */
+export function mergeToolServers(
+  hostServers: Readonly<Record<string, McpServerConfig>> | undefined,
+  profileServers: readonly ToolServerConfig[] | undefined,
+): { servers: Record<string, McpServerConfig>; problems: readonly ToolServerProblem[] } {
+  const servers: Record<string, McpServerConfig> = { ...(hostServers ?? {}) };
+  const problems: ToolServerProblem[] = [];
+
+  for (const server of enabledToolServers(profileServers)) {
+    if (Object.prototype.hasOwnProperty.call(servers, server.name)) {
+      problems.push({
+        server: server.name,
+        detail: 'Artemis already provides a tool server under that name, so this profile entry was skipped.',
+      });
+      continue;
+    }
+    servers[server.name] = toMcpConfig(server);
+  }
+
+  return { servers, problems };
+}
+
+/** One profile entry as an {@link McpServerConfig}. */
+function toMcpConfig(server: ToolServerConfig): McpServerConfig {
+  const timeout = server.timeoutMs === undefined ? {} : { timeout: server.timeoutMs };
+  if (server.transport === 'stdio') {
+    return {
+      type: 'stdio',
+      command: server.command ?? '',
+      ...(server.args === undefined ? {} : { args: [...server.args] }),
+      ...(server.env === undefined ? {} : { env: { ...server.env } }),
+      ...timeout,
+    };
+  }
+  return {
+    type: server.transport,
+    url: server.url ?? '',
+    ...(server.headers === undefined ? {} : { headers: { ...server.headers } }),
+    ...timeout,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

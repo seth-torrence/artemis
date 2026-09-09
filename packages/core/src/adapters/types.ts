@@ -61,6 +61,7 @@ import type {
   SessionDelegatedWork,
   SessionId,
   SessionSummary,
+  ToolServerConfig,
 } from '@rx-artemis/protocol';
 
 import type { XdgRootSpec } from '../profiles/xdgFarm.js';
@@ -194,6 +195,21 @@ export interface ResolvedRunInput extends RunInput {
    * its `hooks/` executed.
    */
   readonly plugins?: readonly LocalPlugin[];
+
+  /**
+   * Tool servers this run may reach, as the profile recorded them.
+   *
+   * Resolved rather than requested, like {@link plugins} and for a sharper
+   * version of the same reason: an entry can name an executable, so a renderer
+   * that could send one could start any binary on the machine under the
+   * agent's environment. What the renderer names is a profile; what the host
+   * returns is what that profile holds.
+   *
+   * Read today by the local adapter, which owns its own MCP client
+   * (`local/mcp.ts`). The other providers connect their own tool servers
+   * through the runtime they wrap and ignore this.
+   */
+  readonly toolServers?: readonly ToolServerConfig[];
 
   /**
    * Cancels the run from the outside — app shutdown, window close, a global

@@ -70,6 +70,7 @@ import type {
   BuiltInPromptId,
   ServerProfileCreatedBody,
   ServerSignInStatus,
+  ToolServerConfig,
 } from '@rx-artemis/protocol';
 
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -115,7 +116,12 @@ import {
   discoverMarketplacePlugins,
   linkSkillsIntoCodexHome,
 } from '@rx-artemis/core';
-import { applyPlanLimit, composeAgentPrompts, lowestTierModel } from '@rx-artemis/protocol';
+import {
+  applyPlanLimit,
+  composeAgentPrompts,
+  enabledToolServers,
+  lowestTierModel,
+} from '@rx-artemis/protocol';
 
 import { AgentPromptStore } from './agentPrompts.js';
 import { anyBankAvailable, banksForRun, configureMemoryBanks, isMasterEnabled, promptBanks, syncMemoryBanksInBackground } from './memoryBanks.js';
@@ -900,6 +906,28 @@ function createEngine(options: EngineOptions): ArtemisEngine {
     }
   };
 
+  /**
+   * Profile → the tool servers its runs may reach.
+   *
+   * Read here rather than sent by the renderer for the reason every path
+   * through this function exists: an entry can name an executable, and a
+   * renderer that could put one in a run request could start any binary on the
+   * machine. What crosses the boundary is a profile id.
+   *
+   * A profile that cannot be read is no servers rather than a failed run: the
+   * run itself is about to resolve the same profile for its environment and
+   * will report the problem properly if there is one.
+   */
+  const toolServersFor = async (profileId: ProfileId): Promise<readonly ToolServerConfig[]> => {
+    try {
+      const profile = await profiles.require(profileId);
+      return enabledToolServers(profile.toolServers);
+    } catch (error) {
+      log.warn(`Could not read the tool servers for profile ${profileId}`, error);
+      return [];
+    }
+  };
+
   /** The credential vocabulary of the provider a request names. */
   const credentialsFor = (providerId: ProviderId): ProviderCredentialSpec =>
     providers.require(providerId).credentials;
@@ -1085,11 +1113,18 @@ function createEngine(options: EngineOptions): ArtemisEngine {
       // Concurrent because they share only the profile record, which the store
       // caches: the credential decryption and the content scan have no reason to
       // wait for each other on the path of a run that is starting.
-      const [env, plugins] = await Promise.all([
+      const [env, plugins, toolServers] = await Promise.all([
         envFor(profileId, providerId),
         contentPluginsFor(profileId, providerId),
+        toolServersFor(profileId),
       ]);
-      return { env, plugins };
+      return {
+        env,
+        plugins,
+        // Omitted when there are none, so a run on a profile that configured
+        // nothing is byte-for-byte the run it always was.
+        ...(toolServers.length === 0 ? {} : { toolServers }),
+      };
     },
     onError: (error, context) => {
       log.error(`Run ${context.runId} reported a swallowed error during ${context.phase}`, error);
