@@ -788,6 +788,34 @@ export interface AppState {
    */
   readonly modelBySession: Readonly<Record<string, ModelChoice>>;
   /**
+   * The conversation each account was last working in.
+   *
+   * What a launch reopens into. Nothing used to record it, so every restart
+   * landed on a blank column and left the user to find their own conversation
+   * in a sidebar ordered by the transcript file's mtime — a list that says
+   * which file was written last, which is not the same question and answers it
+   * wrongly the moment a background agent, a scheduled firing or another
+   * profile has touched a file since. The reported failure is exactly that: an
+   * unclean restart, a blank column, and the wrong conversation picked out of
+   * the list a moment later.
+   *
+   * Per profile rather than one id for the window, because a session id only
+   * resolves under the config directory it was written in — see
+   * {@link resumeSession}. The account is the key the restore is looked up
+   * under, so an app that comes back on a different profile comes back on
+   * *that* profile's last conversation rather than on one it cannot read.
+   *
+   * Written the moment a column is pointed at a conversation and the moment a
+   * conversation first reports an id, never on the way out — see
+   * {@link rememberOpenSession}. A pointer that were flushed at quit would be
+   * absent from precisely the restarts it exists for.
+   *
+   * Bounded by the number of profiles, so unlike {@link modelBySession} it
+   * needs no cap. A stale entry costs nothing: the restore resolves it against
+   * the live listing and simply does not fire when the conversation is gone.
+   */
+  readonly lastSessionByProfile: Readonly<Record<string, SessionId>>;
+  /**
    * The dock's arrangement as it was when the app last closed.
    *
    * Read once at boot by `restoreDockLayout` and otherwise inert — it is the
@@ -1565,6 +1593,15 @@ interface Prefs {
    * the next launch, which has no id to be looked up under.
    */
   modelBySession?: Record<string, ModelChoice>;
+  /**
+   * The conversation each account was last working in. See
+   * {@link AppState.lastSessionByProfile}.
+   *
+   * Persisted for the reason the field exists: the whole value of knowing which
+   * conversation a window was in is being able to open it again after the
+   * window is gone.
+   */
+  lastSessionByProfile?: Record<string, string>;
   dockLayout?: unknown;
   /**
    * Each conversation's dock arrangement, keyed by session id. The
@@ -1876,6 +1913,23 @@ function numberMap(value: unknown): Record<string, number> | undefined {
 }
 
 /**
+ * Keep only the entries whose value is a non-empty string.
+ *
+ * The same rule as {@link stringList} one map deeper. `lastSessionByProfile`
+ * reaches a session lookup at boot, and an empty string there would match
+ * nothing while still counting as a pointer — a launch that spends a listing
+ * resolving a conversation that cannot exist.
+ */
+function stringMap(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === 'string' && entry !== '') out[key] = entry;
+  }
+  return out;
+}
+
+/**
  * The stored preferences text, from the file, or from `localStorage` once.
  *
  * The file is where these live now — see `main/prefs.ts` for why they left
@@ -1999,6 +2053,7 @@ function loadPrefs(): Prefs {
     // on a control the user opens to get *out* of a bad directory.
     recentFolders: stringList(raw['recentFolders']),
     modelBySession: modelChoiceMap(raw['modelBySession']),
+    lastSessionByProfile: stringMap(raw['lastSessionByProfile']),
     ...(typeof raw['runLocation'] === 'string' ? { runLocation: raw['runLocation'] } : {}),
     ...(typeof raw['lastLocalProfileId'] === 'string'
       ? { lastLocalProfileId: raw['lastLocalProfileId'] }
@@ -2125,6 +2180,7 @@ function savePrefs(): void {
     settingsSection: s.settingsSection,
     quickModelIdsByProfile: s.quickModelIdsByProfile,
     modelBySession: s.modelBySession,
+    lastSessionByProfile: s.lastSessionByProfile,
     dockLayout: captureDockLayout(s),
     dockLayouts: captureDockArrangements(s),
     conversationWidth: s.conversationWidth,
@@ -2349,6 +2405,7 @@ export const useApp = create<AppState>(() => ({
 
   quickModelIdsByProfile: prefs.quickModelIdsByProfile ?? {},
   modelBySession: prefs.modelBySession ?? {},
+  lastSessionByProfile: prefs.lastSessionByProfile ?? {},
   conversationWidth: prefs.conversationWidth ?? DEFAULT_CONVERSATION_WIDTH,
   runSummary: prefs.runSummary ?? DEFAULT_RUN_SUMMARY,
   fontSize: initialFontSize,
@@ -6957,6 +7014,12 @@ export async function bootstrap(): Promise<void> {
   await adoptTerminals(focusedPane());
   await adoptBrowsers(focusedPane());
   await refreshSessions();
+  // The conversation this account was last working in, back in the column it
+  // was left in. After the listing, which is what resolves the stored id into
+  // something openable, and before the reads below, so those are issued for the
+  // account and directory the restored conversation runs under rather than for
+  // the seed it displaced.
+  restoreLastSession(focusedPane());
   useApp.setState({ booted: true });
 
   // Deliberately after `booted`, and deliberately not awaited. Fetching the
@@ -8798,6 +8861,93 @@ function rememberModelChoice(pane: Pane): void {
 }
 
 /**
+ * File the conversation showing in a column under the account that pays for it.
+ *
+ * The pointer {@link restoreLastSession} reads at boot, and the moments it is
+ * written are the whole of it. Both are moments *inside* a session's life
+ * rather than at the end of one:
+ *
+ *  - a column is pointed at a conversation ({@link resumeSession}), and
+ *  - a conversation first reports an id (`session.started`, and the promotion
+ *    at `run.end` for the fork whose id only arrives there).
+ *
+ * Writing it on the way out instead — at quit, or from a window listener —
+ * would record nothing in exactly the case this exists for. The incident that
+ * prompted it was a machine that went down with the app still running: there
+ * was no quit, so a quit-time write would have persisted the conversation
+ * *before* the one the user lost.
+ *
+ * A column showing nothing records nothing, the same rule
+ * {@link rememberModelChoice} follows: an unstarted conversation has no id, and
+ * "the account is between conversations" is not worth overwriting a good
+ * pointer with.
+ *
+ * Writes state and nothing else, as its neighbour does — persisting is the
+ * caller's, because the two call sites in {@link resumeSession} save anyway and
+ * a second write there would be a second atomic rewrite of the file per click.
+ * Returns whether the entry moved, so the call site on the event path can save
+ * only when it did.
+ */
+function rememberOpenSession(pane: Pane): boolean {
+  const state = paneState(pane);
+  const profileId = state.activeProfileId;
+  const sessionId = sessionShownBy(state);
+  if (profileId === null || sessionId === null) return false;
+  // Never file a conversation under an account that is not the one running it.
+  // A run bills the account it started on for its whole life, so a profile
+  // switched while a turn was in flight leaves the column naming one account
+  // and the run another — and a pointer written from that moment would send
+  // the next launch at a transcript the account it is filed under cannot read,
+  // over the top of a perfectly good one.
+  if (state.run !== null && state.run.profileId !== profileId) return false;
+  if (useApp.getState().lastSessionByProfile[profileId] === sessionId) return false;
+
+  useApp.setState((s) => ({
+    lastSessionByProfile: { ...s.lastSessionByProfile, [profileId]: sessionId },
+  }));
+  return true;
+}
+
+/**
+ * Put a column back on the conversation its account was last working in.
+ *
+ * Called once, from {@link bootstrap}, after the listing has landed — the
+ * listing is both what proves the conversation still exists and what carries
+ * the profile, provider and directory it has to be opened under.
+ *
+ * Nothing happens when the column already holds a conversation. A run adopted
+ * seconds earlier by {@link adoptLiveRuns} is an agent working *now*, which
+ * outranks any pointer written before the app went down, and a window that
+ * moved the column onto it must not have that taken away by a restore.
+ *
+ * Resolved through {@link resumeSession} rather than by writing
+ * `resumeSessionId`, because the id alone is not enough: a session resolves
+ * only under the account and directory it was written in, and everything else
+ * that belongs to reopening a conversation — its model, its dock, its history —
+ * hangs off that one function. This is the click the user used to have to make
+ * themselves, made for them.
+ */
+function restoreLastSession(pane: Pane = focusedPane()): void {
+  const state = paneState(pane);
+  if (state.run !== null || state.resumeSessionId !== null) return;
+
+  const profileId = state.activeProfileId;
+  if (profileId === null) return;
+
+  const app = useApp.getState();
+  const wanted = app.lastSessionByProfile[profileId];
+  if (wanted === undefined) return;
+
+  // Reachable by *this* account, not merely present: the listing spans every
+  // profile, and resuming a row another account owns would switch who pays
+  // without anyone asking for it.
+  const session = app.sessions.find((one) => one.id === wanted && canReachSession(one, profileId));
+  if (session === undefined) return;
+
+  resumeSession(session, pane);
+}
+
+/**
  * What a conversation was last left running on, or `undefined`.
  *
  * `undefined` — no entry — is the ordinary state for every conversation that
@@ -10612,6 +10762,9 @@ export function resumeSession(session: SessionSummary, pane: Pane = focusedPane(
   if (open !== undefined) {
     if (useApp.getState().background.some((p) => p.id === open.id)) handOver(pane, open);
     useApp.setState({ paletteOpen: false, focusedPaneId: open.id });
+    // A return is a switch: this is the conversation to come back to now, and
+    // the column it is in is the one that knows which account is paying.
+    rememberOpenSession(open);
     savePrefs();
     /*
      * "Already open" is only a layout answer, not a liveness answer.
@@ -10690,6 +10843,10 @@ export function resumeSession(session: SessionSummary, pane: Pane = focusedPane(
   // the one that most often names a scratch checkout, which `rememberFolder`
   // declines.
   rememberFolder(session.cwd);
+  // The conversation to reopen into next launch, recorded now rather than at
+  // quit — see `rememberOpenSession`. Before the save below, so the pointer and
+  // the directory beside it reach the file in the same write.
+  rememberOpenSession(target);
   savePrefs();
 
   const moved = [
@@ -12568,6 +12725,11 @@ function applyAgentEvent(event: AgentEvent): void {
           ...(event.permissionMode === undefined ? {} : { permissionMode: event.permissionMode }),
         },
       });
+      // The moment a brand-new conversation acquires an identity is the moment
+      // it can be reopened, so it becomes this account's conversation to come
+      // back to now — not when the turn ends, and certainly not at quit. See
+      // `rememberOpenSession`.
+      if (rememberOpenSession(pane)) savePrefs();
       // A session that has only just been created is not in the list the
       // sidebar is currently showing. Waiting for `run.end` to reveal it means
       // the thing the user is watching happen is the one thing missing from
@@ -12679,6 +12841,10 @@ function applyAgentEvent(event: AgentEvent): void {
             }
           : s.run,
       }));
+      // A fork's own id exists only from here — `session.started` reported the
+      // conversation it branched from — so the promotion above is the first and
+      // only chance to record the branch as what this account is working in.
+      if (rememberOpenSession(pane)) savePrefs();
       if (event.error) {
         if (event.error.code === 'rate_limit') {
           // The limit wall grows a door: name the window that tripped and when
