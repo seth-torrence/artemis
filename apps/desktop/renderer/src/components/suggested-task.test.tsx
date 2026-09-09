@@ -228,6 +228,24 @@ describe('the suggested-task chip', () => {
     expect(row?.textContent).toContain('No Artemis Server profile');
   });
 
+  it('says the server row hands the prompt over rather than sending it', () => {
+    // The one row whose label does not describe what happens — "Send" is what
+    // the *user* then does — so the line under it has to carry that.
+    setUp({
+      profiles: [
+        { id: 'p1', label: 'P', providerId: 'claude', configDir: '/Users/me/.claude' },
+        { id: 's1', label: 'Server', providerId: 'artemis', configDir: '' },
+      ],
+    });
+    mount();
+    drawTurn();
+
+    openMenu();
+    const row = screen.getByText('Send to a server').closest('[role="menuitem"]');
+    expect(row?.getAttribute('aria-disabled')).toBeNull();
+    expect(row?.textContent).toContain('prefilled for you to review and send');
+  });
+
   it('does not put an unusable target on the primary button', () => {
     // The primary is the one control a user presses without reading, so it
     // falls back to something that works rather than explaining a dead click.

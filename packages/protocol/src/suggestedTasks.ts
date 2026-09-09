@@ -83,6 +83,14 @@ export interface SuggestedTask {
  *                  what is in the checkout. Needs a repository.
  *  - `server`    — a fresh conversation on an Artemis Server: another machine
  *                  entirely. Needs a server profile.
+ *
+ * The first three send the prompt. `server` is the one that does not: it opens
+ * the column and puts the prompt in its composer for the user to review and
+ * send. Which served account runs the work, on which model, at what thinking
+ * level, is the choice a person moves work to a server in order to make — and
+ * on a column that has just been opened, none of those answers exists yet. See
+ * `startSuggestedTask` in the renderer's store for the two concrete faults
+ * sending anyway produced.
  */
 export const SUGGESTED_TASK_TARGETS = ['here', 'session', 'worktree', 'server'] as const;
 

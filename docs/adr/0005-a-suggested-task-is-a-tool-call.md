@@ -35,3 +35,13 @@ control that could never appear.
 Where a chosen task runs is the **user's** choice, never the model's: this
 session, a new one, a git worktree, or a server. That is why the tool is called
 `suggest_task` and not `spawn_task`, and why it takes no working directory.
+
+The server target goes one step further and does not send at all: it opens the
+column, points it at the server, and puts the prompt in the composer for the
+user to review and send. Which served account runs the work, on which model, at
+what thinking level, is exactly the choice a person moves work to a server in
+order to make, and on a column that has just been opened none of those answers
+exists yet — the catalogue has not arrived, so a send posts a run with no model
+and the server answers `model_not_found`, and the account would be whichever
+route it happened to list first. The other three targets have one obvious
+answer to all of that and keep sending.

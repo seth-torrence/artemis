@@ -81,7 +81,7 @@ const TARGET_DETAILS: Readonly<Record<SuggestedTaskTarget, string>> = {
   here: 'Sends the task as the next message in this conversation.',
   session: 'Opens a new conversation beside this one, in the same directory.',
   worktree: 'Splits a git worktree on a new branch, and works there.',
-  server: 'Starts the task on an Artemis Server instead of this machine.',
+  server: 'Opens it on an Artemis Server, prefilled for you to review and send.',
 };
 
 /**

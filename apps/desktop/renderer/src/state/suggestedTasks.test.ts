@@ -18,7 +18,7 @@
  * files, so the assertions are behavioural.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * A bridge that answers only what these tests reach for.
@@ -29,12 +29,34 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * with none at all.
  */
 const createWorktree = vi.fn();
+const submitted = vi.fn();
+
+/**
+ * The background reads a new column kicks off — the catalogue, the commands,
+ * the session list, the auth probe. None is what these tests are about, and all
+ * of them are floating promises, so each answers a plain failure rather than
+ * being left to throw into nothing.
+ */
+const refused = () =>
+  Promise.resolve({
+    ok: false as const,
+    error: { code: 'transport', message: 'not wired in this test', retryable: false },
+  });
+
 (globalThis.window as unknown as { artemis: unknown }).artemis = {
   workspace: { createWorktree },
+  providers: { models: refused, commands: refused },
+  sessions: { list: refused, listAll: refused },
+  auth: { status: refused },
+  // The one call a *send* would make. Nothing here should reach it — see the
+  // server target's own tests — and a spy is how that is proved rather than
+  // assumed.
+  runs: { start: (...args: unknown[]) => (submitted(...args), refused()) },
 };
 
 const {
   allPanes,
+  closePane,
   dismissSuggestedTask,
   focusedPane,
   setSuggestedTaskTarget,
@@ -45,6 +67,7 @@ const {
   useApp,
 } = await import('./store');
 const { paneState, setPaneState } = await import('./pane');
+type Pane = import('./pane').Pane;
 
 const pane = () => focusedPane();
 const session = () => paneState(pane());
@@ -61,8 +84,12 @@ const IN_A_REPO = {
 const status = (context: unknown, target: unknown) =>
   suggestedTaskTargetStatus(context as never, target as never);
 
+const SERVER = { id: 's1', label: 'Server', providerId: 'artemis', configDir: '' };
+const LOCAL = { id: 'p1', label: 'Local', providerId: 'claude', configDir: '/c' };
+
 beforeEach(() => {
   createWorktree.mockReset();
+  submitted.mockReset();
   useApp.setState({ banners: [], profiles: [], suggestedTaskTarget: 'here' });
   setPaneState(pane(), {
     cwd: '/code/kronos',
@@ -184,5 +211,92 @@ describe('a worktree that cannot be made', () => {
     expect(suggestedTaskDismissed(session(), 't:c1')).toBe(false);
     expect(allPanes()).toHaveLength(columns);
     expect(useApp.getState().banners.at(-1)?.message).toContain('worktree');
+  });
+});
+
+/**
+ * The server target hands the prompt over; it does not send it.
+ *
+ * Three of the four end in a send and this one deliberately does not, because
+ * on a column that has just been opened the two questions a send has to answer
+ * have no answers yet: the served catalogue has not arrived, so the run goes
+ * out with no model and the server replies `model_not_found`; and the model
+ * choice is null, so the account would be whichever route the server happened
+ * to list first. Which account, which model and what thinking level is the
+ * choice a person moves work to a server in order to make.
+ */
+describe('sending a task to a server', () => {
+  beforeEach(() => {
+    useApp.setState({ profiles: [LOCAL, SERVER] });
+    setPaneState(pane(), { activeProfileId: 'p1', activeProviderId: 'claude' });
+  });
+
+  afterEach(() => {
+    // `splitPane` focuses what it opened, and the store is a singleton across
+    // this file — a column left behind would be the one the next test's
+    // `pane()` returned.
+    for (const extra of allPanes().slice(1)) closePane(extra.id);
+  });
+
+  /**
+   * Hand the task over, and give back both columns.
+   *
+   * `from` is the one the chip was clicked in — captured before the call,
+   * because `splitPane` focuses what it opened and `focusedPane()` is no longer
+   * it afterwards. That is the whole reason this helper exists: an assertion
+   * written against `pane()` after the hand-off reads the wrong column and
+   * passes or fails for the wrong reason.
+   */
+  async function handOff(): Promise<{ from: Pane; to: Pane }> {
+    const from = pane();
+    await startSuggestedTask('t:c1', TASK, 'server', from);
+    const to = allPanes().find((p) => p.id !== from.id);
+    if (to === undefined) throw new Error('no column was opened');
+    return { from, to };
+  }
+
+  it('opens a column on the server with the prompt waiting in it', async () => {
+    const { to } = await handOff();
+
+    expect(paneState(to).activeProfileId).toBe('s1');
+    // The same field a restored or parked draft lands in, so it is editable
+    // and recallable exactly as anything typed here would be.
+    expect(paneState(to).draft).toBe(TASK.prompt);
+  });
+
+  it('never submits — the regression this target exists to avoid', async () => {
+    const { to } = await handOff();
+
+    expect(submitted).not.toHaveBeenCalled();
+    // Nothing is running in the new column either, so the profile, the model
+    // and the thinking level are all still the user's to change before sending.
+    expect(paneState(to).run).toBeNull();
+  });
+
+  it('leaves the model unchosen, so the picker shows the catalogue', async () => {
+    const { to } = await handOff();
+
+    // Null rather than a first-row guess: `activeModel` falling back to
+    // `models[0]` is what made the served account arbitrary.
+    expect(paneState(to).model).toBeNull();
+  });
+
+  it('puts the chip away in the column it was offered in', async () => {
+    const { from } = await handOff();
+
+    expect(suggestedTaskDismissed(paneState(from), 't:c1')).toBe(true);
+    expect(useApp.getState().suggestedTaskTarget).toBe('server');
+  });
+
+  it('says so and does nothing when the server has gone', async () => {
+    useApp.setState({ profiles: [LOCAL] });
+    const from = pane();
+    const columns = allPanes().length;
+
+    await startSuggestedTask('t:c1', TASK, 'server', from);
+
+    expect(allPanes()).toHaveLength(columns);
+    expect(suggestedTaskDismissed(paneState(from), 't:c1')).toBe(false);
+    expect(useApp.getState().banners.at(-1)?.message).toContain('No server');
   });
 });

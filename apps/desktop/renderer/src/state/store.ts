@@ -5960,6 +5960,27 @@ export function setSuggestedTaskTarget(target: SuggestedTaskTarget): void {
  * leaves the offer standing, because the user is about to try it somewhere
  * else, and hunting back through a transcript for a chip that vanished on a
  * failure is the wrong way to learn what happened.
+ *
+ * ## The server target hands over rather than sending
+ *
+ * Three of the four end in a send. `server` deliberately does not: it opens the
+ * column, points it at the server, puts the prompt in the composer and gives
+ * the caret back. The user picks the account, the model and the thinking level
+ * and presses send themselves.
+ *
+ * That is not politeness, it is the only correct behaviour available here, and
+ * two concrete faults say so. **The catalogue is not there yet.** A freshly
+ * split column has no models until `refreshModels` answers, which for a server
+ * is a round trip; sending into that gap posts a run with no model and the
+ * server replies `model_not_found`. **And the account would be arbitrary.** The
+ * new column's model choice is null, so `activeModel` falls back to
+ * `models[0]` — whichever route the server happened to list first. A local
+ * target has one obvious answer to both questions and a server has neither:
+ * which served account runs the work, on which model, at what thinking level,
+ * is exactly the choice a person moves work to a server in order to make.
+ *
+ * So `serverProfile()` picks only the column's *starting* profile. Nothing is
+ * live in it, so every one of those choices is still the user's to change.
  */
 export async function startSuggestedTask(
   callId: string,
@@ -5972,6 +5993,16 @@ export async function startSuggestedTask(
 
   setSuggestedTaskTarget(target);
   dismissSuggestedTask(callId, pane);
+
+  if (target === 'server') {
+    // The same field a restored or parked draft lands in — see `swapDraft` —
+    // so the prompt is editable, recallable and survives the column being
+    // looked away from, exactly as anything else typed here would.
+    setPaneState(column, { draft: task.prompt });
+    focusComposer(column.id);
+    return;
+  }
+
   await submitPrompt(task.prompt, undefined, column);
 }
 
@@ -6021,6 +6052,11 @@ async function prepareSuggestedTaskColumn(
       // nothing about where new conversations go, and quietly moving that
       // preference is how somebody ends up billing a week of work to a machine
       // they picked once.
+      //
+      // A starting point, not a decision. The caller hands the prompt to this
+      // column's composer instead of sending it, so the profile — and the
+      // model and thinking level under it — are all still open. See
+      // {@link startSuggestedTask}.
       setProfile(server.id, column);
       return column;
     }
