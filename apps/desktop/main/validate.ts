@@ -177,6 +177,7 @@ import {
   type TerminalStartRequest,
   type TerminalWriteRequest,
   type WindowRequest,
+  type WorkspaceCreateWorktreeRequest,
   type WorkspaceDescribeRequest,
   type WorkspacePickDirectoryRequest,
 } from '@rx-artemis/protocol';
@@ -1431,6 +1432,29 @@ export function validateWorkspacePickDirectory(raw: unknown): WorkspacePickDirec
 export function validateWorkspaceDescribe(raw: unknown): WorkspaceDescribeRequest {
   const request = requireRequest(raw);
   return { path: requireAbsolutePath(request['path'], 'path') };
+}
+
+/**
+ * Splitting a worktree: a directory, and a branch name that is not a path.
+ *
+ * The branch is the field worth a rule. It becomes a directory under the
+ * checkout and a ref in `.git`, so a name free to contain `..`, a leading
+ * slash, or a drive letter is a name free to put the worktree — and its
+ * branch — somewhere nobody chose. The permitted alphabet is exactly what
+ * `suggestedTaskBranch` produces, checked here rather than trusted, because
+ * this channel is reachable by anything running in the renderer and not only
+ * by the code that composes the name.
+ */
+export function validateWorkspaceCreateWorktree(raw: unknown): WorkspaceCreateWorktreeRequest {
+  const request = requireRequest(raw);
+  const branch = requireString(request['branch'], 'branch', LIMITS.label);
+  if (!/^[a-z0-9][a-z0-9-]*(?:\/[a-z0-9][a-z0-9-]*)*$/.test(branch)) {
+    throw new ValidationError(
+      'branch',
+      'must be lowercase letters, digits and dashes, in slash-separated segments',
+    );
+  }
+  return { path: requireAbsolutePath(request['path'], 'path'), branch };
 }
 
 /**

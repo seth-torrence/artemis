@@ -38,6 +38,7 @@ export const CAPABILITY_LABELS: Record<CapabilityKey, string> = {
   systemPromptAppend: 'standing instructions from the prompt library',
   imageInput: 'images in a prompt',
   fileInput: 'file attachments',
+  taskSuggestions: 'follow-up tasks suggested by the agent',
 };
 
 export interface CapabilityStatus {

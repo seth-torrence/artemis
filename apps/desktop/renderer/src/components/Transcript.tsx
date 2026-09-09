@@ -202,6 +202,7 @@ import {
 } from '@rx-artemis/transcript';
 import {
   isGroupId,
+  isSuggestedTaskCall,
   type ActivityGroup,
   type AssistantItem,
   type CommandItem,
@@ -213,6 +214,7 @@ import {
   type UserItem,
 } from '@rx-artemis/transcript';
 import { DiffView } from './DiffView';
+import { SuggestedTaskCard } from './SuggestedTask';
 import { ActivityIndicator } from './Activity';
 import { ConversationLoading, EmptyState } from './EmptyState';
 import { InlinePermission } from './InlinePermission';
@@ -1176,7 +1178,32 @@ function ThinkingRow({ item }: { readonly item: ThinkingItem }): ReactElement {
  * on a handful of rows per session is the cheaper half of the trade against
  * putting `cwd` into `ToolCard`'s props and out of its own memo.
  */
-function ToolRow({ item }: { readonly item: ToolItem }): ReactElement {
+function ToolRow({ item }: { readonly item: ToolItem }): ReactElement | null {
+  /*
+   * An offer, not a call.
+   *
+   * `suggest_task` is a tool the *host* defines, whose handler does nothing and
+   * whose only product is this row — see `@rx-artemis/protocol`'s
+   * `suggestedTasks`. Drawing it as a tool card would file a question to the
+   * reader as a report of work, under a `tool` label, with the prompt shown as
+   * a quoted argument. So the row is the chip, and the gutter says so.
+   *
+   * `null` when the chip declines to draw: a malformed call, or one this column
+   * has put away. A dismissed suggestion leaves no gap — the offer is gone, and
+   * a `tool` card left in its place would be the machinery the chip exists to
+   * spare the reader.
+   */
+  if (isSuggestedTaskCall(item)) {
+    return (
+      <Line label="task" tone="beam" ts={item.ts} className="my-1">
+        <SuggestedTaskCard item={item} />
+      </Line>
+    );
+  }
+  return <ToolCallRow item={item} />;
+}
+
+function ToolCallRow({ item }: { readonly item: ToolItem }): ReactElement {
   const cwd = usePane((s) => s.cwd);
   const platform = useApp((s) => s.platform);
   const artifact = useMemo(

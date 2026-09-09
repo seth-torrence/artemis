@@ -27,7 +27,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session } from 'electron';
 
-import { IPC_PUSH, PREFS_READ_CHANNEL, PREFS_WRITE_CHANNEL } from '@rx-artemis/protocol';
+import {
+  IPC_PUSH,
+  PREFS_READ_CHANNEL,
+  PREFS_WRITE_CHANNEL,
+  SUGGESTED_TASK_SERVER,
+} from '@rx-artemis/protocol';
 
 import { profilesRoot } from '@rx-artemis/core';
 
@@ -66,6 +71,7 @@ import {
   browserToolServer,
   externalBrowserToolServer,
 } from './browserTools.js';
+import { suggestedTaskToolServer } from './taskTools.js';
 import { createServerHost, type ServerHost } from './server.js';
 import { createRoutineHost, type RoutineHost } from './routines.js';
 import { createTerminalHost, type TerminalHost } from './terminal.js';
@@ -426,21 +432,22 @@ async function bootstrap(): Promise<void> {
     appVersion: app.getVersion(),
     ...(sdkExecutablePath === undefined ? {} : { sdkExecutablePath }),
     /*
-     * The agent's browser tools, built per run.
+     * The agent's own tools, built per run.
      *
      * This is the composition root doing the one thing only it can: `core` is
      * forbidden from importing Electron, and a tool that drives a
      * `WebContentsView` is Electron all the way down. So the factory is handed
      * across the wall here, closing over the host that owns the views.
      */
-    agentToolServers: (runId, input) =>
+    agentToolServers: (runId, input) => ({
       /*
        * Which browser the agent gets is the run input's call — see the
        * decision table on `agentBrowserServers`. The builders are lazy so a
        * run that gets the Chrome bridge (or the external opener) never
-       * constructs the embedded server it will not use.
+       * constructs the embedded server it will not use. It answers `undefined`
+       * for the Chrome case, which spreads to nothing.
        */
-      agentBrowserServers(input, {
+      ...agentBrowserServers(input, {
         embedded: () =>
           browserToolServer(runId, {
             ensure: (run, url) => browsers.openForAgent(run, url),
@@ -452,6 +459,16 @@ async function bootstrap(): Promise<void> {
         // way out because model output does not get a second-chance rule.
         external: () => externalBrowserToolServer((url) => openExternalSafely(url)),
       }),
+      /*
+       * Suggested tasks, on every run and under no preference.
+       *
+       * Nothing about it depends on the input: it opens no surface, spends no
+       * quota and cannot act, so there is no arrangement of a run in which
+       * offering it would be wrong. The only thing that turns it off is a
+       * provider that cannot take host tools at all, which never reaches here.
+       */
+      [SUGGESTED_TASK_SERVER]: suggestedTaskToolServer(),
+    }),
   });
 
   // The updater exists before the IPC layer because the layer's handlers

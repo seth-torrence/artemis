@@ -18,8 +18,14 @@
  *    into its own, so the UI asks one question rather than two.
  *
  * All three answer rather than throw, and none needs `git` on the PATH.
+ *
+ * `worktree.ts` is the exception that proves the last clause: it *makes* a
+ * directory rather than describing one, it is the only thing here that runs
+ * `git`, and it is called on a click. It answers rather than throws like the
+ * rest.
  */
 
 export * from './workdir.js';
 export * from './repo.js';
 export * from './temp.js';
+export * from './worktree.js';

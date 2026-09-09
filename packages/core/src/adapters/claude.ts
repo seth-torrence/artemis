@@ -121,6 +121,7 @@ import {
   isPdf,
   NO_CAPABILITIES,
   PDF_MEDIA_TYPE,
+  SUGGESTED_TASK_TOOL,
 } from '@rx-artemis/protocol';
 
 import {
@@ -233,6 +234,7 @@ export const CLAUDE_CAPABILITIES: Capabilities = {
   systemPromptAppend: true, // `{ type: 'preset', preset: 'claude_code', append }`
   imageInput: true, // base64 `image` blocks in the user message's content
   fileInput: true, // staged to a granted temp directory and named in the prompt
+  taskSuggestions: true, // `Options.mcpServers`, through `agentToolServers`
 };
 
 /** Env var selecting an isolated Claude config — and therefore session — directory. */
@@ -4736,6 +4738,28 @@ class ClaudeProcess {
      */
     if (!this.#ensureTurn()) {
       return this.#denyResult(DISPOSED_DENY_MESSAGE, options.toolUseID);
+    }
+
+    /*
+     * The one tool that is never asked about.
+     *
+     * `suggest_task` is Artemis's own, its handler runs in Artemis's process,
+     * and all it does is return a sentence: nothing is read, written, spawned
+     * or spent — the call's only effect is that it is *in the transcript*,
+     * which is what draws a chip. There is nothing for a person to weigh, and
+     * parking the turn to ask them would be worse than pointless: it would put
+     * an approval card in front of a suggestion they are about to be shown
+     * anyway and could simply ignore, and it would teach them to click through
+     * prompts, which is the one habit the permission surface cannot afford.
+     *
+     * Allowed here rather than through the SDK's own `Options.allowedTools`,
+     * which auto-approves by *shadowing* `canUseTool` entirely — a mechanism
+     * whose blast radius is every tool named in it and whose behaviour is the
+     * SDK's to change. This is one name, checked in the open, and a run that
+     * never sees the tool is unaffected.
+     */
+    if (toolName === SUGGESTED_TASK_TOOL) {
+      return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID };
     }
 
     this.#permissionCounter += 1;
