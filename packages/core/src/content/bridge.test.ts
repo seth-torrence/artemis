@@ -47,6 +47,7 @@ import {
   buildContentBridge,
   discoverMarketplacePlugins,
   linkSkillsIntoCodexHome,
+  resolveContentPlugins,
 } from './bridge.js';
 
 const describeIfSymlinks = process.platform === 'win32' ? describe.skip : describe;
@@ -639,5 +640,115 @@ describeIfSymlinks('linkSkillsIntoCodexHome', () => {
     writeFileSync(path.join(configDir, 'skills'), 'not a directory');
 
     await expect(linkSkillsIntoCodexHome({ configDir, home })).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * One skill, offered once.
+ *
+ * Reported as a skill appearing in the composer's menu twice — under
+ * `artemis-skills:` and again under its author's plugin. The two are the same
+ * files reached two ways: the user installed a marketplace plugin *and* has
+ * its skills copied into `~/.agents/skills`, which the bridge links.
+ *
+ * Only one side can give way. A marketplace plugin is handed to the run whole
+ * — that is the departure the header argues for — so nothing here can remove
+ * a skill from inside it. The bridge is a directory Artemis assembles, so the
+ * bridge is what yields.
+ */
+describeIfSymlinks('resolveContentPlugins', () => {
+  /** A marketplace plugin that ships skills, nested the way a real one does. */
+  function seedPluginSkill(installPath: string, category: string, name: string): void {
+    const dir = path.join(installPath, 'skills', category, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: From the plugin.\n---\n`);
+  }
+
+  function seedEnabledPlugin(configDir: string, home: string, installPath: string): void {
+    const key = 'mattpocock-skills@claude-plugins-official';
+    mkdirSync(path.join(installPath, '.claude-plugin'), { recursive: true });
+    writeFileSync(
+      path.join(installPath, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'mattpocock-skills', version: '1.2.3' }),
+    );
+    const record = path.join(configDir, 'plugins', 'installed_plugins.json');
+    mkdirSync(path.dirname(record), { recursive: true });
+    writeFileSync(
+      record,
+      JSON.stringify({ version: 2, plugins: { [key]: [{ scope: 'user', installPath, version: '1.2.3' }] } }),
+    );
+    const settings = path.join(home, '.claude', 'settings.json');
+    mkdirSync(path.dirname(settings), { recursive: true });
+    writeFileSync(settings, JSON.stringify({ enabledPlugins: { [key]: true } }));
+  }
+
+  it('does not bridge a skill an enabled marketplace plugin already provides', async () => {
+    const { configDir, dataDir, home } = sandbox();
+    const installPath = path.join(home, '.claude', 'plugins', 'cache', 'mattpocock', '1.2.3');
+    seedEnabledPlugin(configDir, home, installPath);
+    seedPluginSkill(installPath, 'engineering', 'tdd');
+    // The user's own copy of the plugin's skill, and one that is theirs alone.
+    seedSkill(path.join(configDir, 'skills'), 'tdd');
+    seedSkill(path.join(configDir, 'skills'), 'ask-matt');
+
+    const plugins = await resolveContentPlugins({ configDir, dataDir, home });
+
+    const bridge = plugins.find((plugin) => plugin.path.startsWith(dataDir));
+    expect(bridge).toBeDefined();
+    // `tdd` is the plugin's to offer; `ask-matt` is nobody else's.
+    expect(listSkills(path.join(bridge?.path ?? '', 'skills'))).toEqual(['ask-matt']);
+    // And the plugin itself is still handed over, whole.
+    expect(plugins.map((plugin) => plugin.path)).toContain(installPath);
+  });
+
+  it('offers every skill it offered before, each of them once', async () => {
+    // The point of the de-duplication is that it removes an *offering*, never
+    // a skill: whatever was reachable before has to still be reachable, under
+    // one name instead of two.
+    const { configDir, dataDir, home } = sandbox();
+    const installPath = path.join(home, '.claude', 'plugins', 'cache', 'mattpocock', '1.2.3');
+    seedEnabledPlugin(configDir, home, installPath);
+    seedPluginSkill(installPath, 'engineering', 'tdd');
+    seedPluginSkill(installPath, 'productivity', 'grilling');
+    seedSkill(path.join(configDir, 'skills'), 'tdd');
+    seedSkill(path.join(configDir, 'skills'), 'ask-matt');
+
+    const plugins = await resolveContentPlugins({ configDir, dataDir, home });
+    const bridge = plugins.find((plugin) => plugin.path.startsWith(dataDir));
+    const bridged = bridge === undefined ? [] : listSkills(path.join(bridge.path, 'skills'));
+    const fromPlugin = ['tdd', 'grilling'];
+
+    expect([...bridged, ...fromPlugin].sort()).toEqual(['ask-matt', 'grilling', 'tdd']);
+  });
+
+  it('bridges everything when no marketplace plugin is enabled', async () => {
+    const { configDir, dataDir, home } = sandbox();
+    seedSkill(path.join(configDir, 'skills'), 'tdd');
+    seedSkill(path.join(configDir, 'skills'), 'ask-matt');
+
+    const plugins = await resolveContentPlugins({ configDir, dataDir, home });
+
+    expect(plugins).toHaveLength(1);
+    expect(listSkills(path.join(plugins[0]?.path ?? '', 'skills'))).toEqual(['ask-matt', 'tdd']);
+  });
+
+  it('stops bridging a skill once the plugin that provides it is installed', async () => {
+    // The bridge is reconciled per run, so a name that stops being ours has to
+    // leave the directory rather than linger from the launch before.
+    const { configDir, dataDir, home } = sandbox();
+    seedSkill(path.join(configDir, 'skills'), 'tdd');
+    const first = await resolveContentPlugins({ configDir, dataDir, home });
+    expect(listSkills(path.join(first[0]?.path ?? '', 'skills'))).toEqual(['tdd']);
+
+    const installPath = path.join(home, '.claude', 'plugins', 'cache', 'mattpocock', '1.2.3');
+    seedEnabledPlugin(configDir, home, installPath);
+    seedPluginSkill(installPath, 'engineering', 'tdd');
+
+    const after = await resolveContentPlugins({ configDir, dataDir, home });
+    const bridge = after.find((plugin) => plugin.path.startsWith(dataDir));
+    // Nothing of the user's own is left to bridge, so there may be no bridge
+    // at all — either way it offers `tdd` no longer.
+    const offered = bridge === undefined ? [] : listSkills(path.join(bridge.path, 'skills'));
+    expect(offered).toEqual([]);
   });
 });

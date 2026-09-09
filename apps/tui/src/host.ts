@@ -49,10 +49,9 @@ import type {
 import {
   ProfileStore,
   RunRegistry,
-  buildContentBridge,
   checkAuthStatus,
-  discoverMarketplacePlugins,
   linkSkillsIntoCodexHome,
+  resolveContentPlugins,
   createCatalogue,
   createDefaultProviderRegistry,
   managedEnvKeys,
@@ -215,11 +214,10 @@ export function createTuiHost(dataDir: string, options: TuiHostOptions = {}): Tu
       await linkSkillsIntoCodexHome({ configDir, onWarning });
       return [];
     }
-    const [bridged, marketplace] = await Promise.all([
-      buildContentBridge({ configDir, dataDir, onWarning }),
-      discoverMarketplacePlugins({ configDir, onWarning }),
-    ]);
-    return [...bridged, ...marketplace];
+    // One call, because the two sources overlap: a skill the user's own
+    // marketplace plugin provides must not also be bridged under Artemis's
+    // name. See `resolveContentPlugins`.
+    return resolveContentPlugins({ configDir, dataDir, onWarning });
   };
 
   const runs = new RunRegistry({

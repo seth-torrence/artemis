@@ -375,6 +375,12 @@ export interface ContentBridgeOptions {
   readonly dataDir: string;
   /** Stand-in for `$HOME`. Overridden only by tests. */
   readonly home?: string;
+  /**
+   * Skill names already provided by something else in the same run, which
+   * this bridge must therefore not offer a second time. See
+   * {@link resolveContentPlugins}.
+   */
+  readonly exclude?: ReadonlySet<string>;
   readonly onWarning?: ContentWarning;
 }
 
@@ -393,10 +399,13 @@ export async function buildContentBridge(
   const commandsDir = join(options.configDir, 'commands');
 
   try {
-    const [skills, commands] = await Promise.all([
+    const [discovered, commands] = await Promise.all([
       discoverSkills(skillSources),
       hasCommands(commandsDir),
     ]);
+    const skills = options.exclude === undefined
+      ? discovered
+      : discovered.filter((skill) => !options.exclude?.has(skill.name));
     if (skills.length === 0 && !commands) return [];
 
     const bridgeDir = join(options.dataDir, BRIDGES_DIR, bridgeKey(options.configDir));
@@ -592,6 +601,65 @@ export async function discoverMarketplacePlugins(
     );
     return [];
   }
+}
+
+/**
+ * Every skill name an enabled marketplace plugin offers.
+ *
+ * A plugin nests its skills as it likes — `skills/engineering/tdd` is a real
+ * one — and Claude addresses each by its leaf directory name whatever the
+ * depth, so that is what is collected. Read only to know what *not* to bridge;
+ * nothing here changes what the plugin itself contributes.
+ */
+async function pluginSkillNames(plugins: readonly LocalPlugin[]): Promise<ReadonlySet<string>> {
+  const names = new Set<string>();
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > SKILL_SEARCH_DEPTH) return;
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
+    if (entries === null) return;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const child = join(dir, entry.name);
+      const isSkill = await stat(join(child, 'SKILL.md'))
+        .then((info) => info.isFile())
+        .catch(() => false);
+      if (isSkill) names.add(entry.name);
+      else await walk(child, depth + 1);
+    }
+  };
+  for (const plugin of plugins) await walk(join(plugin.path, 'skills'), 0);
+  return names;
+}
+
+/** How far into a plugin's `skills/` to look. Deep enough for a category, not a filesystem. */
+const SKILL_SEARCH_DEPTH = 3;
+
+/**
+ * Everything a Claude run should load on the user's behalf, each thing once.
+ *
+ * The two sources are independent but not unrelated, and the relation is the
+ * reason this exists rather than each caller doing both: a user who installed
+ * a marketplace plugin *and* has its skills sitting in `~/.agents/skills` is
+ * offered every one of them twice, under `artemis-skills:` and again under the
+ * author's own name. That was reported from the composer's menu, but the menu
+ * is only where it shows — the model is handed the same skill twice too.
+ *
+ * The marketplace plugin wins, because it is the one that cannot lose: it is
+ * passed to the run whole, so nothing here can take a skill out of it. The
+ * bridge is a directory Artemis assembles, so the bridge is what yields — and
+ * a skill dropped from it is not a skill lost, it is the same skill under the
+ * name its author gave it.
+ */
+export async function resolveContentPlugins(
+  options: ContentBridgeOptions,
+): Promise<readonly LocalPlugin[]> {
+  const marketplace = await discoverMarketplacePlugins({
+    configDir: options.configDir,
+    ...(options.home === undefined ? {} : { home: options.home }),
+    ...(options.onWarning === undefined ? {} : { onWarning: options.onWarning }),
+  });
+  const bridged = await buildContentBridge({ ...options, exclude: await pluginSkillNames(marketplace) });
+  return [...bridged, ...marketplace];
 }
 
 /* -------------------------------------------------------------------------- */
