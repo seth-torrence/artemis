@@ -13,6 +13,14 @@
  * renders even when plan limits are unavailable, which is why it sits above
  * the early returns rather than inside the windows list.
  *
+ * ## Two shapes, one slot
+ *
+ * A provider with no plan at all — a local server — gets the same slot in a
+ * context-only form: one ring, `Ctx 12.3k / 32k`. The bar used to show it a
+ * disabled gauge glyph, which was true and useless, since the context window is
+ * the *only* budget such a run spends. See {@link ContextOnlyMeter}; the plan
+ * path below is untouched by it.
+ *
  * ## The trigger is three rings
  *
  *     5hr ⬤  Week ⬤  Fable ⬤
@@ -48,7 +56,8 @@ import {
 import { call, resolveBridge } from '../lib/bridge';
 import { formatTokens } from '@rx-artemis/transcript';
 import { useServedAccount } from '../hooks/useServedAccount';
-import { activeCapabilities, activeProviderLabel, useApp } from '../state/store';
+import { activeCapabilities, useApp } from '../state/store';
+import { useContextReading } from '../hooks/useContextReading';
 import { usePane, usePaneRef } from '../state/paneContext';
 import { paneState } from '../state/pane';
 import { WithReason } from './disabled-reason';
@@ -547,7 +556,6 @@ export function PlanUsageMeter(): ReactElement | null {
   const pane = usePaneRef();
   const profileId = usePane((s) => s.activeProfileId);
   const supported = usePane((s) => activeCapabilities(s).planUsageReporting);
-  const providerLabel = usePane(activeProviderLabel);
 
   /*
    * At an Artemis Server profile the reading belongs to the *served account*
@@ -594,21 +602,17 @@ export function PlanUsageMeter(): ReactElement | null {
 
   if (profileId === null) return null;
 
-  if (!supported) {
-    return (
-      /*
-        Still the gauge glyph here, deliberately, rather than three empty rings:
-        an unfilled ring is indistinguishable from a ring at 0%, and "this
-        provider cannot report limits" must not read as "you have used none of
-        them". A different shape is the point.
-      */
-      <WithReason reason={`${providerLabel} does not report plan usage.`} side="top">
-        <span aria-disabled="true" className="px-1 text-ink-faint opacity-60">
-          <GaugeIcon className="size-3" aria-hidden="true" />
-        </span>
-      </WithReason>
-    );
-  }
+  /*
+    No plan is not the same as nothing to report.
+
+    A local server has no subscription to be near the end of — but it has a
+    context window filling up, and that is the same question the rings answer:
+    how much room is left. So the slot stays occupied rather than collapsing to
+    a disabled glyph, and what fills it is whichever of the two this provider
+    can actually answer. The glyph is still the outcome when it can answer
+    neither; see {@link ContextOnlyMeter}.
+  */
+  if (!supported) return <ContextOnlyMeter />;
 
   const slots = meterSlots(usage);
 
@@ -655,6 +659,100 @@ export function PlanUsageMeter(): ReactElement | null {
 
       <PopoverContent align="start" side="top" className="w-72 p-3">
         <PlanUsageBody usage={usage} refreshing={refreshing} now={now} onRefresh={() => void load('refresh')} />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
+ * The meter on a provider that has no plan behind it.
+ * ============================================================================
+ *
+ * A local server is the case this was written for. There is no subscription, no
+ * 5-hour window and no weekly cap — `planUsageReporting` is false and honestly
+ * so — and the slot on the status bar was therefore a disabled gauge glyph
+ * saying "llama.cpp does not report plan usage". Which is true, and useless:
+ * the thing a local run most needs to know is precisely the thing the rings
+ * exist to say. How much room is left. It just is not room on a *plan*.
+ *
+ * So the same slot, in the same visual language, reports the only budget this
+ * provider has. One ring rather than three, because there is one number;
+ * "Ctx" in front of it on the same rule as "5hr" and "Week"; and the figures
+ * spelled out beside it — `12.3k / 32k` — because a percentage alone leaves
+ * "of what" unanswered, and on a local server "of what" is a decision the user
+ * made when they started it and may well have forgotten.
+ *
+ * ## The unknown window is a first-class state
+ *
+ * Behind a router that only proxies `/v1`, no endpoint will state a window
+ * size. The ring then shows its dash and the numbers read `12.3k` with nothing
+ * after them — occupancy without a scale, which is what is actually known. It
+ * is not an error and does not present as one; the popover says which provider
+ * declined to state a size.
+ *
+ * When even the occupancy is unavailable — a provider with neither capability —
+ * this falls back to the glyph the plan meter used to show, deliberately rather
+ * than to an empty ring: an unfilled ring is indistinguishable from a ring at
+ * 0%, and "cannot report" must not read as "you have used none of it".
+ */
+function ContextOnlyMeter(): ReactElement {
+  const { reporting, tokens, window, utilization, label, providerLabel } = useContextReading();
+  const [open, setOpen] = useState(false);
+
+  if (!reporting) {
+    return (
+      <WithReason reason={`${providerLabel} does not report plan usage or context.`} side="top">
+        <span aria-disabled="true" className="px-1 text-ink-faint opacity-60">
+          <GaugeIcon className="size-3" aria-hidden="true" />
+        </span>
+      </WithReason>
+    );
+  }
+
+  /*
+    Spelled out for a screen reader rather than left as "Ctx 38": the ring's
+    number is inside a button whose label overrides its children, so a bare
+    percentage with no window attached would be all that was announced — the
+    same reasoning as {@link describeSlot}.
+  */
+  const spoken =
+    tokens === undefined
+      ? 'no run yet'
+      : window === undefined
+        ? `${formatTokens(tokens)} used, window size unknown`
+        : `${formatTokens(tokens)} of ${formatTokens(window)}`;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        aria-label={`Context window — ${spoken}`}
+        // Same chrome as the plan trigger: `gap-1` inside a slot, and the hover
+        // goes to the wash the chips beside it wear.
+        className="flex shrink-0 items-center gap-1 rounded-md px-1 hover:bg-wash"
+      >
+        <span className="font-mono text-2xs text-ink-faint">Ctx</span>
+        <UsageRing utilization={utilization} />
+        {label === '' ? null : (
+          <span className={cn('font-mono text-2xs tabular-nums', toneFor(utilization))}>
+            {label}
+          </span>
+        )}
+      </PopoverTrigger>
+
+      <PopoverContent align="start" side="top" className="w-72 p-3">
+        <div className="flex flex-col gap-2.5">
+          <ContextWindowRow />
+          {/*
+            Said once, here, rather than left to be inferred from an absence.
+            The popover on a Claude profile lists plan windows under this row;
+            on this one there are none, and a blank space below a context bar
+            reads as a reading that failed to load.
+          */}
+          <p className="text-2xs text-ink-faint">
+            {providerLabel} has no plan limits — the context window is the only
+            budget a local run spends.
+          </p>
+        </div>
       </PopoverContent>
     </Popover>
   );
@@ -856,40 +954,30 @@ function PlanWindows({
  * new session, not on a clock.
  */
 function ContextWindowRow(): ReactElement {
-  const usage = usePane((s) => s.run?.usage);
-  const reporting = usePane((s) => activeCapabilities(s).usageReporting);
-  const providerLabel = usePane(activeProviderLabel);
-
-  // The live run only learns its window at run end, so during a turn we fall
-  // back to what this model reported last time. That memory is persisted, so
-  // after the first ever run on a model the total is known from launch.
-  //
-  // Deliberately no hardcoded default: a model's window is the provider's fact
-  // to state, and a table of specs here would go stale silently and show a
-  // confidently wrong denominator. Unknown stays blank until the model says.
-  const model = usePane((s) => s.run?.model);
-  const running = usePane((s) => s.run !== null);
-  const remembered = usePane((s) => (model === undefined ? undefined : s.contextWindows[model]));
-  const window = usage?.contextWindow ?? remembered;
-
-  // Before the first usage event a started session genuinely holds no context
-  // beyond its prompt, so 0 is the honest reading — not "unknown".
-  const tokens = usage?.contextTokens ?? (running && window !== undefined ? 0 : undefined);
-  const pct =
-    reporting && tokens !== undefined && window ? Math.min(100, (tokens / window) * 100) : null;
+  /*
+    The reading itself is `useContextReading`, shared with the trigger above and
+    with the run-details dialog. It used to be computed here and separately
+    there, which is the one thing a status line must not do — two readings of
+    one conversation, on one screen, that can disagree.
+  */
+  const { reporting, tokens, window, utilization: pct, providerLabel } = useContextReading();
 
   /*
-    Three distinct states, and they must not collapse into one dash:
-      - the provider cannot report usage at all   → say which provider, and why
+    Four distinct states, and they must not collapse into one dash:
+      - the provider cannot report context at all → say which provider, and why
       - it can, but nothing has run yet           → say so
+      - it has, but nobody stated a window size   → the tokens, and why no scale
       - it has                                    → the numbers
-    A bare "—" for the first case reads as a bug rather than a limitation.
+    A bare "—" for the first case reads as a bug rather than a limitation, and
+    the third is the ordinary case behind a router that only proxies `/v1`.
   */
   const note = !reporting
-    ? `${providerLabel} does not report token usage`
-    : pct === null
+    ? `${providerLabel} does not report context usage`
+    : tokens === undefined
       ? 'no run yet'
-      : `${formatTokens(tokens ?? 0)} of ${formatTokens(window ?? 0)} · clears on a new session`;
+      : window === undefined
+        ? `${formatTokens(tokens)} used · ${providerLabel} did not say how large the window is`
+        : `${formatTokens(tokens)} of ${formatTokens(window)} · clears on a new session`;
 
   return (
     <div className="flex flex-col gap-1">

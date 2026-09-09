@@ -165,6 +165,7 @@ export const ALL_CAPABILITIES: Capabilities = {
   rewind: true,
   usageReporting: true,
   costReporting: true,
+  contextReporting: true,
   planUsageReporting: true,
   imageInput: true,
   fileInput: true,

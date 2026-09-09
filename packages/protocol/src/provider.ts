@@ -198,6 +198,26 @@ export interface Capabilities {
   readonly costReporting: boolean;
 
   /**
+   * The provider reports **both halves** of the context readout: how many
+   * tokens the conversation is occupying, and how large the window they occupy
+   * is — `UsageSnapshot.contextTokens` and `UsageSnapshot.contextWindow`.
+   *
+   * Separate from {@link usageReporting} because the two answer different
+   * questions and a provider can do the first without the second. Token counts
+   * are what a turn *spent*; a context reading is how full the conversation
+   * has become, and it needs a denominator nothing can guess — a table of
+   * model specs held here would go stale silently and print a confidently
+   * wrong "of 128k" under a server started with `-c 32768`.
+   *
+   * The flag exists so the status line can offer a gauge to a provider that
+   * has no plan behind it at all. {@link planUsageReporting} answers "is there
+   * a subscription to be near the end of"; this answers "is there a
+   * conversation to be near the end of", and a local server has the second
+   * without the first.
+   */
+  readonly contextReporting: boolean;
+
+  /**
    * The provider can report consumption against a *plan's* limits, as opposed
    * to the per-run counts {@link usageReporting} covers.
    *
@@ -301,6 +321,7 @@ export const NO_CAPABILITIES: Capabilities = {
   rewind: false,
   usageReporting: false,
   costReporting: false,
+  contextReporting: false,
   planUsageReporting: false,
   systemPromptAppend: false,
   imageInput: false,

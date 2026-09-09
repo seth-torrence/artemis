@@ -252,6 +252,9 @@ export const OPENCODE_CAPABILITIES: Capabilities = {
   // occupancy and cost on the `usage_update` notification.
   usageReporting: true,
   costReporting: true,
+  // Verified: the same `usage_update` carries the window and how much of it the
+  // conversation is holding.
+  contextReporting: true,
   // Metered credits, not a subscription with rate-limit windows.
   planUsageReporting: false,
   // Advertised as `promptCapabilities.image`, and — since 2026-08-18 — actually

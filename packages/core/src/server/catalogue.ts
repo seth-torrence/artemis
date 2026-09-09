@@ -389,6 +389,7 @@ const EMPTY_CAPABILITIES = {
   rewind: false,
   usageReporting: false,
   costReporting: false,
+  contextReporting: false,
   planUsageReporting: false,
   systemPromptAppend: false,
   imageInput: false,
