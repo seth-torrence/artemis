@@ -38,5 +38,11 @@ conversation, not to the window.
 
 **Pane** — a slot in the window's grid displaying one conversation.
 
+**Suggested task** — follow-up work an agent *offers* at the end of a turn, drawn
+as a chip under its answer. Deliberately not a "task": the Tasks surface holds
+*delegated work*, which is running, and a suggested task has not started and may
+never. Offering is never doing — where a chosen one runs (this session, a new
+one, a worktree, a server) is the user's choice.
+
 **Seed** — the small set of values (canvas, accent) from which a theme's full
 token ramp is derived.

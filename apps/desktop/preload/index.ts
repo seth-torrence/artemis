@@ -149,6 +149,7 @@ import {
   type TerminalWriteRequest,
   type WindowRequest,
   type WindowState,
+  type WorkspaceCreateWorktreeRequest,
   type WorkspaceDescribeRequest,
   type WorkspacePickDirectoryRequest,
 } from '@rx-artemis/protocol';
@@ -693,6 +694,8 @@ const bridge: ArtemisBridge = Object.freeze({
     pickDirectory: (request: WorkspacePickDirectoryRequest) =>
       invoke(IPC.workspacePickDirectory, request),
     describe: (request: WorkspaceDescribeRequest) => invoke(IPC.workspaceDescribe, request),
+    createWorktree: (request: WorkspaceCreateWorktreeRequest) =>
+      invoke(IPC.workspaceCreateWorktree, request),
   }),
 
   /**

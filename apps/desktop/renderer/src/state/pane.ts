@@ -367,6 +367,23 @@ export interface SessionState extends MirroredState {
    */
   readonly dismissedTasks: readonly string[];
   /**
+   * Suggested-task chips this column has been shown and put away.
+   *
+   * By the id of the tool call that offered each one — see
+   * `@rx-artemis/protocol`'s `suggestedTasks` for why an offer *is* a tool call
+   * — so a dismissal survives every rebuild of the transcript rows and is
+   * unambiguous across two suggestions with the same title.
+   *
+   * Renderer-local, and deliberately not persisted, which is the opposite
+   * decision from the chips themselves. The offer lives in the provider's
+   * transcript because it is part of the record of what the agent said; putting
+   * it away is a fact about this reading of it, and a suggestion the user
+   * declined last week is one they may well want to see when they reopen the
+   * conversation to work out what was left undone. Nothing is lost by being
+   * wrong in that direction — the chip is one line, and the × is still there.
+   */
+  readonly dismissedSuggestedTasks: readonly string[];
+  /**
    * Whether the delegated tab on screen is one the user opened by hand.
    *
    * The mirror of {@link dismissedTasks}, and it exists for the setting that

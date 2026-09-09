@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, ToolEndStatus } from '@rx-artemis/protocol';
+import { SUGGESTED_TASK_TOOL } from '@rx-artemis/protocol';
 import {
   TranscriptModel,
   isGroupId,
+  isSuggestedTaskCall,
   frameScheduler,
   syncScheduler,
   type AssistantItem,
@@ -1459,5 +1461,77 @@ describe('a silent run', () => {
     model.apply({ type: 'run.end', reason: 'completed', runId: 'run_2', seq: 0, ts: 2000 } as AgentEvent);
 
     expect(ended(model)).toMatchObject({ kind: 'run-end', silent: true });
+  });
+});
+
+/**
+ * An offer is not machinery.
+ *
+ * A suggested task reaches the model as a tool call like any other, and every
+ * other tool call in a run sinks into the marker at its foot. This one must
+ * not: a question put to the reader, folded behind "Ran 36 commands", is a
+ * question nobody answers. See `isSuggestedTaskCall`.
+ */
+describe('TranscriptModel suggested tasks', () => {
+  const TASK = { title: 'Add tests', tldr: 'No coverage.', prompt: 'Write the tests.' };
+
+  function call(id: string, name: string, input: Record<string, unknown> = {}) {
+    return [
+      { type: 'tool.start', toolCallId: id, name, input },
+      { type: 'tool.end', toolCallId: id, status: 'ok' },
+    ] as Array<Omit<AgentEvent, 'runId' | 'seq' | 'ts'>>;
+  }
+
+  it('stands where it was made while the work around it folds', () => {
+    const model = build();
+    for (const event of stream(
+      ...call('c1', 'Bash'),
+      { type: 'text.complete', messageId: 'm1', role: 'assistant', text: 'Done.' },
+      ...call('c2', SUGGESTED_TASK_TOOL, TASK),
+      ...call('c3', 'Bash'),
+    )) {
+      model.apply(event);
+    }
+
+    // The offer is its own row, directly under the answer it followed — which
+    // is where the reader is looking when they finish reading. The two shell
+    // calls are one marker, at the foot of the run, where the machinery goes.
+    expect(model.getRowsSnapshot()).toEqual(['a:m1:0', 't:c2', 'g:t:c1']);
+  });
+
+  it('is not counted as a document', () => {
+    // Nothing was made. The Documents surface lists things to open, and an
+    // offer is not one of them.
+    const model = build();
+    model.setArtifactTest(() => true);
+    for (const event of stream(...call('c1', SUGGESTED_TASK_TOOL, TASK))) model.apply(event);
+
+    expect(model.getArtifactsSnapshot()).toEqual([]);
+    expect(model.getRowsSnapshot()).toEqual(['t:c1']);
+  });
+
+  it('recognises the call from its name alone, malformed or not', () => {
+    // A call the model got the arguments wrong on is still an offer it made,
+    // and the row that draws it can say so. Folding it back into the marker
+    // would hide the mistake in the one place nobody opens.
+    const model = build();
+    for (const event of stream(...call('c1', SUGGESTED_TASK_TOOL, { title: '' }))) {
+      model.apply(event);
+    }
+
+    expect(isSuggestedTaskCall(model.getItem('t:c1'))).toBe(true);
+    expect(model.getRowsSnapshot()).toEqual(['t:c1']);
+  });
+
+  it('says no to every other tool, including one merely named like it', () => {
+    const model = build();
+    for (const event of stream(...call('c1', 'suggest_task'), ...call('c2', 'Bash'))) {
+      model.apply(event);
+    }
+
+    // The bare name is somebody else's MCP server. The prefixed one is ours,
+    // and the prefix is the whole of the identity.
+    expect(isSuggestedTaskCall(model.getItem('t:c1'))).toBe(false);
+    expect(model.getRowsSnapshot()).toEqual(['g:t:c1']);
   });
 });

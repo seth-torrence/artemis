@@ -149,6 +149,8 @@ export const IPC = {
   workspacePickDirectory: 'artemis:workspace:pick-directory',
   /** Name a directory: its own name, and its repository's when it has one. */
   workspaceDescribe: 'artemis:workspace:describe',
+  /** Split a new git worktree off a repository, for work that must not collide. */
+  workspaceCreateWorktree: 'artemis:workspace:create-worktree',
 
   /**
    * Read which of each Claude profile's shared entries are actually symlinked
@@ -1535,6 +1537,44 @@ export interface WorkspaceDescribeResponse {
    * rather than anything the renderer could recognise by sight.
    */
   readonly temporary?: boolean;
+}
+
+/**
+ * Split a new worktree off a repository, and say where it landed.
+ *
+ * The one channel in this file that runs `git`, which is worth stating rather
+ * than hiding: everything else about repositories in Artemis is answered by
+ * walking directories, precisely so a label never depends on a binary being on
+ * the PATH. A worktree cannot be made that way — it is a `.git` write with
+ * bookkeeping — so this shells out, and inherits `git`'s absence as a plain
+ * failure the caller can show.
+ *
+ * Deliberately not general. There is no `remove`, no `list` and no branch
+ * argument that is not derived from a name: this exists to give one suggested
+ * task a place of its own to run, and a renderer that could name arbitrary git
+ * operations would be a renderer that could name arbitrary git operations.
+ */
+export interface WorkspaceCreateWorktreeRequest {
+  /**
+   * Any absolute path inside the repository to split. The main process
+   * resolves it to the checkout — a path inside an existing worktree splits
+   * from the repository that worktree belongs to, not from the worktree.
+   */
+  readonly path: string;
+  /**
+   * Branch to create, as {@link import('./suggestedTasks.js').suggestedTaskBranch}
+   * spells one. Taken as a *request*: a name already in use is suffixed rather
+   * than refused, because the alternative is an error message whose only
+   * remedy is for the user to invent a different name for the same work.
+   */
+  readonly branch: string;
+}
+
+export interface WorkspaceCreateWorktreeResponse {
+  /** Absolute path to the new worktree — where a session started here works. */
+  readonly path: string;
+  /** The branch actually created, which may be {@link WorkspaceCreateWorktreeRequest.branch} suffixed. */
+  readonly branch: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2960,6 +3000,7 @@ export type IpcRequestMap = {
   [IPC.sessionsListAll]: SessionsListAllRequest;
   [IPC.workspacePickDirectory]: WorkspacePickDirectoryRequest;
   [IPC.workspaceDescribe]: WorkspaceDescribeRequest;
+  [IPC.workspaceCreateWorktree]: WorkspaceCreateWorktreeRequest;
   [IPC.sharedConfigStatus]: SharedConfigStatusRequest;
   [IPC.previewOpen]: PreviewOpenRequest;
   [IPC.filesRead]: FilesReadRequest;
@@ -3063,6 +3104,7 @@ export type IpcResponseMap = {
   [IPC.sessionsListAll]: SessionsListAllResponse;
   [IPC.workspacePickDirectory]: WorkspacePickDirectoryResponse;
   [IPC.workspaceDescribe]: WorkspaceDescribeResponse;
+  [IPC.workspaceCreateWorktree]: WorkspaceCreateWorktreeResponse;
   [IPC.sharedConfigStatus]: SharedConfigStatusResponse;
   [IPC.previewOpen]: PreviewOpenResponse;
   [IPC.filesRead]: FilesReadResponse;
@@ -3371,6 +3413,17 @@ export interface ArtemisBridge {
      * it whenever the working directory changes.
      */
     describe(request: WorkspaceDescribeRequest): Promise<IpcResult<WorkspaceDescribeResponse>>;
+
+    /**
+     * Split a new worktree off the repository a path is in.
+     *
+     * Unlike its two neighbours this runs `git`, creates a directory and
+     * writes a branch, so it is called on a click and never on a keystroke.
+     * See {@link WorkspaceCreateWorktreeRequest}.
+     */
+    createWorktree(
+      request: WorkspaceCreateWorktreeRequest,
+    ): Promise<IpcResult<WorkspaceCreateWorktreeResponse>>;
   };
 
   /**

@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentEvent, PermissionRequestEvent, RunEndEvent } from '@rx-artemis/protocol';
+import { SUGGESTED_TASK_TOOL } from '@rx-artemis/protocol';
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 const sdkMock = vi.hoisted(() => ({
@@ -33,7 +34,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   },
 }));
 
-const { buildClaudeOptions, createClaudeAdapter, mapSystemPrompt } = await import('../claude.js');
+const { buildClaudeOptions, CLAUDE_CAPABILITIES, createClaudeAdapter, mapSystemPrompt } =
+  await import('../claude.js');
 const { AsyncQueue } = await import('../stream.js');
 const { AdapterError, toAgentError } = await import('../types.js');
 type ResolvedRunInput = import('../types.js').ResolvedRunInput;
@@ -3404,5 +3406,88 @@ describe('an interrupt that reports queued messages', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Suggested tasks                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The one tool that is never asked about.
+ *
+ * `suggest_task` is Artemis's own, its handler runs in Artemis's process, and
+ * its only effect is that the call is in the transcript — which is what draws a
+ * chip. There is nothing for a person to weigh, so parking the turn to ask them
+ * would put an approval card in front of a suggestion they can already ignore,
+ * and teach them to click through prompts. See `#canUseTool`.
+ */
+describe('suggested tasks', () => {
+  const TASK = { title: 'Add tests', tldr: 'No coverage.', prompt: 'Write the tests.' };
+
+  /** `canUseTool` for a named tool, called exactly as the SDK would. */
+  function ask(options: Record<string, unknown>, toolName: string, input: Record<string, unknown>) {
+    const canUseTool = options['canUseTool'] as (
+      name: string,
+      args: Record<string, unknown>,
+      opts: Record<string, unknown>,
+    ) => Promise<unknown>;
+    return canUseTool(toolName, input, {
+      signal: new AbortController().signal,
+      toolUseID: 'toolu_task',
+      requestId: 'req_task',
+      title: 'Claude wants to suggest a task',
+    });
+  }
+
+  it('allows the call itself, with the arguments untouched', async () => {
+    const { harness } = installQuery();
+    const run = await createClaudeAdapter().createRun(BASE_INPUT);
+    harness().fake.messages.push(INIT_MESSAGE);
+
+    await expect(ask(harness().options, SUGGESTED_TASK_TOOL, TASK)).resolves.toEqual({
+      behavior: 'allow',
+      updatedInput: TASK,
+      toolUseID: 'toolu_task',
+    });
+    await run.dispose();
+  });
+
+  it('parks nothing on the stream, so no card is ever drawn for it', async () => {
+    const { harness } = installQuery();
+    const run = await createClaudeAdapter().createRun(BASE_INPUT);
+    const iterator = run.events[Symbol.asyncIterator]();
+    harness().fake.messages.push(INIT_MESSAGE);
+    await iterator.next();
+
+    await ask(harness().options, SUGGESTED_TASK_TOOL, TASK);
+
+    // The next event is the one that follows in the conversation, not a
+    // `permission.request` for the suggestion. Asserted by what arrives rather
+    // than by a timeout, so a request emitted late still fails this.
+    harness().fake.messages.push(RESULT_MESSAGE);
+    const next = (await iterator.next()).value as AgentEvent;
+    expect(next.type).not.toBe('permission.request');
+    await run.dispose();
+  });
+
+  it('still asks about every other tool, including one from the same server', async () => {
+    // The allowance is one name, checked in the open — not a blanket exemption
+    // for anything Artemis happens to have registered.
+    const { harness } = installQuery();
+    const run = await createClaudeAdapter().createRun(BASE_INPUT);
+    const iterator = run.events[Symbol.asyncIterator]();
+    harness().fake.messages.push(INIT_MESSAGE);
+    await iterator.next();
+
+    void ask(harness().options, 'mcp__artemisTasks__something_else', {});
+    const event = (await iterator.next()).value as PermissionRequestEvent;
+
+    expect(event.type).toBe('permission.request');
+    await run.dispose();
+  });
+
+  it('declares the capability the chips are gated on', () => {
+    expect(CLAUDE_CAPABILITIES.taskSuggestions).toBe(true);
   });
 });
