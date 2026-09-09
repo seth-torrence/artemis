@@ -70,6 +70,7 @@ import type {
   BuiltInPromptId,
   ServerProfileCreatedBody,
   ServerSignInStatus,
+  ToolServerConfig,
 } from '@rx-artemis/protocol';
 
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -115,7 +116,12 @@ import {
   discoverMarketplacePlugins,
   linkSkillsIntoCodexHome,
 } from '@rx-artemis/core';
-import { applyPlanLimit, composeAgentPrompts, lowestTierModel } from '@rx-artemis/protocol';
+import {
+  applyPlanLimit,
+  composeAgentPrompts,
+  enabledToolServers,
+  lowestTierModel,
+} from '@rx-artemis/protocol';
 
 import { AgentPromptStore } from './agentPrompts.js';
 import { anyBankAvailable, banksForRun, configureMemoryBanks, isMasterEnabled, promptBanks, syncMemoryBanksInBackground } from './memoryBanks.js';
@@ -778,6 +784,19 @@ function createEngine(options: EngineOptions): ArtemisEngine {
         }
       },
     },
+    /*
+     * The same factory, handed to the provider whose loop is Artemis's own.
+     *
+     * The one call, not a second one built for the occasion: which browser a
+     * run gets is decided once, in `agentBrowserServers`, and a local run that
+     * asked the question separately would eventually answer it differently.
+     * `local/mcp.ts` is the client that reaches what comes back.
+     */
+    local: {
+      ...(options.agentToolServers === undefined
+        ? {}
+        : { agentToolServers: options.agentToolServers }),
+    },
   });
 
   /**
@@ -884,6 +903,28 @@ function createEngine(options: EngineOptions): ArtemisEngine {
     } catch (error) {
       log.warn('Could not compose the agent prompt library; starting without it', error);
       return input;
+    }
+  };
+
+  /**
+   * Profile → the tool servers its runs may reach.
+   *
+   * Read here rather than sent by the renderer for the reason every path
+   * through this function exists: an entry can name an executable, and a
+   * renderer that could put one in a run request could start any binary on the
+   * machine. What crosses the boundary is a profile id.
+   *
+   * A profile that cannot be read is no servers rather than a failed run: the
+   * run itself is about to resolve the same profile for its environment and
+   * will report the problem properly if there is one.
+   */
+  const toolServersFor = async (profileId: ProfileId): Promise<readonly ToolServerConfig[]> => {
+    try {
+      const profile = await profiles.require(profileId);
+      return enabledToolServers(profile.toolServers);
+    } catch (error) {
+      log.warn(`Could not read the tool servers for profile ${profileId}`, error);
+      return [];
     }
   };
 
@@ -1072,11 +1113,18 @@ function createEngine(options: EngineOptions): ArtemisEngine {
       // Concurrent because they share only the profile record, which the store
       // caches: the credential decryption and the content scan have no reason to
       // wait for each other on the path of a run that is starting.
-      const [env, plugins] = await Promise.all([
+      const [env, plugins, toolServers] = await Promise.all([
         envFor(profileId, providerId),
         contentPluginsFor(profileId, providerId),
+        toolServersFor(profileId),
       ]);
-      return { env, plugins };
+      return {
+        env,
+        plugins,
+        // Omitted when there are none, so a run on a profile that configured
+        // nothing is byte-for-byte the run it always was.
+        ...(toolServers.length === 0 ? {} : { toolServers }),
+      };
     },
     onError: (error, context) => {
       log.error(`Run ${context.runId} reported a swallowed error during ${context.phase}`, error);

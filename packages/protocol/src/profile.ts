@@ -57,6 +57,7 @@
 import type { ProfileId } from './ids.js';
 import { PLAN_CAPACITIES } from './planCapacity.js';
 import type { ProviderId } from './provider.js';
+import type { ToolServerConfig } from './toolServer.js';
 
 /**
  * A stored profile. **Main process only.**
@@ -125,6 +126,20 @@ export interface Profile {
    * set for this endpoint themselves.
    */
   readonly baseUrl?: string;
+
+  /**
+   * Tool servers this profile's runs may reach, or absent for none.
+   *
+   * Beside {@link baseUrl} because it is the same kind of fact: what this
+   * endpoint's runs can do, recorded by Artemis because the endpoint records
+   * nothing. See `toolServer.ts` for the shape, why secrets are referenced
+   * rather than written, and which providers read it.
+   *
+   * Validate with {@link toolServersProblem} before writing, on the same
+   * reasoning as `configDir` — a profile record is JSON on disk and a user can
+   * edit it, so the check happens on the way in and again on the way out.
+   */
+  readonly toolServers?: readonly ToolServerConfig[];
 
   /**
    * A colour the user picked for this profile, as `#rrggbb`, or absent.
@@ -263,6 +278,16 @@ export interface ProfileMetadata {
   /** The server this profile talks to, or absent for the default. See {@link Profile.baseUrl}. */
   readonly baseUrl?: string;
   /**
+   * The tool servers configured for this profile. See {@link Profile.toolServers}.
+   *
+   * Carried across whole, unlike `publicEnv` beside it, because there is
+   * nothing here the renderer may not see: a config that held a secret would
+   * have been refused on the way in ({@link toolServersProblem}), so what
+   * survives is names, addresses and `${NAME}` references. The settings form
+   * cannot edit a list it is not allowed to read back.
+   */
+  readonly toolServers?: readonly ToolServerConfig[];
+  /**
    * Whether a key is stored for this endpoint — never the key.
    *
    * A boolean is the whole of what the renderer may know, and the field is
@@ -295,6 +320,8 @@ export interface ProfileDraft {
   readonly publicEnv?: Readonly<Record<string, string>>;
   /** The server to talk to. Omit for the provider's default. See {@link Profile.baseUrl}. */
   readonly baseUrl?: string;
+  /** Tool servers to create the profile with. See {@link Profile.toolServers}. */
+  readonly toolServers?: readonly ToolServerConfig[];
   /**
    * A key for that endpoint, when it wants one — `llama-server --api-key`, a
    * reverse proxy, a tunnel that authenticates.
@@ -344,6 +371,17 @@ export interface ProfilePatch {
    * that is not a second field.
    */
   readonly baseUrl?: string;
+  /**
+   * Replace the whole list of tool servers, or **the empty array** to keep
+   * none.
+   *
+   * Wholesale rather than per entry, and that is the honest shape for what the
+   * editor does: the form holds the list, the user edits it, and the save is
+   * "this is the list now". A per-entry patch vocabulary would be a second way
+   * to express the same thing and a second thing to keep in step with the
+   * form. Omitted leaves the stored list alone.
+   */
+  readonly toolServers?: readonly ToolServerConfig[];
   /**
    * Set, replace, or remove the endpoint's key. The **empty string clears it**.
    *

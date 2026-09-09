@@ -332,9 +332,16 @@ gate and the result-feedback cycle. The transport is the easy half.
 
 That is a real expense and it buys something the other three cannot offer: every
 `false` in this provider's capability descriptor is a *not yet* rather than a
-*cannot*, because nothing upstream is imposing the limit.
+*cannot*, because nothing upstream is imposing the limit. Two of them have since
+become `true` on exactly that reasoning. Owning the loop means owning an MCP
+client, so a local run reaches the same tool servers a Claude run does — the
+browser in the dock under the same `mcp__artemisBrowser__…` names, plus whatever
+servers the profile names for itself. And owning the loop means owning its turn
+boundaries, so `midRunSteering` is true: a message sent mid-run is taken and
+folded in after the current round of tool calls.
 
-See [docs/research/LMSTUDIO-ADAPTER-RESEARCH.md](docs/research/LMSTUDIO-ADAPTER-RESEARCH.md).
+See [docs/LOCAL-MODEL-TOOLS.md](docs/LOCAL-MODEL-TOOLS.md) and
+[docs/research/LMSTUDIO-ADAPTER-RESEARCH.md](docs/research/LMSTUDIO-ADAPTER-RESEARCH.md).
 
 ### The path a prompt takes
 

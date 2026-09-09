@@ -251,6 +251,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.258
         version: 0.3.258(@anthropic-ai/sdk@0.116.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@4.4.3))(zod@4.4.3)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.30.0
+        version: 1.30.0(supports-color@7.2.0)(zod@4.4.3)
       '@rx-artemis/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -258,9 +261,6 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.116.0
         version: 0.116.0(zod@4.4.3)
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.30.0
-        version: 1.30.0(supports-color@7.2.0)(zod@4.4.3)
       '@types/node':
         specifier: ^26.2.0
         version: 26.2.0

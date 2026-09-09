@@ -207,6 +207,11 @@ export function toMetadata(profile: Profile, hasApiKey = false): ProfileMetadata
      * editor needs about the key, and all it is allowed.
      */
     baseUrl: profile.baseUrl,
+    // Carried whole, for the same reason the address is: the editor cannot
+    // offer to change a list it is not allowed to read. There is nothing
+    // secret in it — a value that looked like a credential was refused on the
+    // way in. See `ProfileMetadata.toolServers`.
+    toolServers: profile.toolServers,
     hasApiKey: hasApiKey ? true : undefined,
     color: profile.color,
     planId: profile.planId,

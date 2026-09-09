@@ -532,8 +532,10 @@ describe('the capability flags and the methods behind them', () => {
     expect(adapter.capabilities.resumeSession).toBe(true);
     expect(adapter.capabilities.rewind).toBe(false);
     expect(adapter.capabilities.forkSession).toBe(false);
-    // Unchanged by any of this — the composer is still disabled mid-turn.
-    expect(adapter.capabilities.midRunSteering).toBe(false);
+    // Unchanged by any of *this* — history is one axis and steering is another
+    // — but no longer false: the loop takes a message at its turn boundaries.
+    // See `steering.test.ts`.
+    expect(adapter.capabilities.midRunSteering).toBe(true);
   });
 
   it('refuses a fork or a rewind rather than quietly continuing', async () => {
