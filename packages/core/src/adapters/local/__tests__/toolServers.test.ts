@@ -177,6 +177,7 @@ describe('a host-built tool server on a local run', () => {
       'write_file',
       'list_files',
       'search',
+      'http_fetch',
       'shell',
       'mcp__artemisBrowser__browser_read',
       'mcp__artemisBrowser__browser_navigate',
@@ -300,8 +301,22 @@ describe('a run with no servers', () => {
     const events = await drain(run);
 
     const started = events.find((event) => event.type === 'session.started') as { tools: string[] };
-    expect(started.tools).toEqual(['read_file', 'write_file', 'list_files', 'search', 'shell']);
-    expect(inference.offered[0]).toEqual(['read_file', 'write_file', 'list_files', 'search', 'shell']);
+    expect(started.tools).toEqual([
+      'read_file',
+      'write_file',
+      'list_files',
+      'search',
+      'http_fetch',
+      'shell',
+    ]);
+    expect(inference.offered[0]).toEqual([
+      'read_file',
+      'write_file',
+      'list_files',
+      'search',
+      'http_fetch',
+      'shell',
+    ]);
   });
 });
 
@@ -407,5 +422,75 @@ describe('a server the profile configured', () => {
 
     expect(inference.offered[0]).toContain('mcp__artemisBrowser__browser_read');
     expect(inference.offered[0]).toContain('mcp__forgejo__list_repos');
+  });
+});
+
+describe('http_fetch, as the run wires it', () => {
+  /** A page on loopback — which is, for this tool’s purposes, a private address. */
+  async function servePage(): Promise<string> {
+    const server = createServer((_request: IncomingMessage, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('the lamp is on');
+    });
+    httpServers.push(server);
+    await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+    const { port } = server.address() as AddressInfo;
+    return `http://127.0.0.1:${String(port)}/states`;
+  }
+
+  it('reaches a machine on the LAN in the default mode, where a person approves it', async () => {
+    // The whole reason private addresses are allowed at all: the endpoints this
+    // user wants are a Home Assistant and a handful of tailnet services.
+    const page = await servePage();
+    const inference = await serveInference([
+      [toolCallChunk('http_fetch', { url: page })],
+      [textChunk('The lamp is on.')],
+    ]);
+
+    const run = await createLocalAdapter(LLAMA_CPP).createRun(runInput(inference.origin));
+    const events = await drain(run);
+
+    expect(names(events, 'permission.request')).toHaveLength(1);
+    expect(names(events, 'tool.end')).toEqual([
+      expect.objectContaining({ name: 'http_fetch', status: 'ok' }),
+    ]);
+  });
+
+  it('refuses the same address in acceptEdits, where nobody is watching', async () => {
+    /*
+     * `acceptEdits` says "stop asking about edits to this directory". It was
+     * never a decision about the network, so an unattended turn under it stays
+     * off the LAN — the same reasoning that keeps the mode from auto-allowing
+     * a tool server.
+     */
+    const page = await servePage();
+    const inference = await serveInference([
+      [toolCallChunk('http_fetch', { url: page })],
+      [textChunk('I could not reach it.')],
+    ]);
+
+    const run = await createLocalAdapter(LLAMA_CPP).createRun(
+      runInput(inference.origin, { permissionMode: 'acceptEdits' }),
+    );
+    const events = await drain(run, undefined);
+
+    // Not asked about — that is what the mode buys — and refused all the same.
+    expect(names(events, 'permission.request')).toHaveLength(0);
+    expect(names(events, 'tool.end')).toEqual([
+      expect.objectContaining({ name: 'http_fetch', status: 'error' }),
+    ]);
+    const ended = events.find((event) => event.type === 'tool.end') as { resultText: string };
+    expect(ended.resultText).toContain('Refused');
+  });
+
+  it('is not offered at all in plan mode', async () => {
+    const inference = await serveInference([[textChunk('here is the plan')]]);
+    const run = await createLocalAdapter(LLAMA_CPP).createRun(
+      runInput(inference.origin, { permissionMode: 'plan' }),
+    );
+    await drain(run);
+
+    expect(inference.offered[0]).not.toContain('http_fetch');
+    expect(inference.offered[0]).toContain('read_file');
   });
 });

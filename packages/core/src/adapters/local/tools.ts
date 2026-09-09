@@ -17,14 +17,27 @@
  * Seatbelt does the work instead. The distinction is why {@link ToolSpec}
  * carries `needsOsSandbox` rather than treating every tool the same.
  *
- * There is now a third kind, and it belongs to neither column: a **tool server**
- * performs its own work in its own process (see `mcp.ts`). Artemis is a client
- * there — it can decline to call, and that is the whole of its power — so those
- * tools carry `needsOsSandbox: false` because there is nothing here to wrap,
- * and `server` because the approval prompt should say whose tool it is. They
- * are not in {@link ALL_TOOLS}: the list below is what Artemis implements, and
- * what a run is offered is that list plus whatever its servers turned out to
- * hold.
+ * **`http_fetch`** is performed by Artemis too, but the thing it reaches is not
+ * a path, so `confine` has nothing to say about it and Seatbelt is not what
+ * bounds it either. Its defences are its own — a redirect cap, a byte ceiling,
+ * a clock, and an address rule keyed to the permission mode (see
+ * `httpFetch.ts`). `needsOsSandbox` stays false because there is no command
+ * line to wrap, and that is a fact about the tool rather than a concession.
+ *
+ * A **tool server** belongs to none of the three columns: it performs its own
+ * work in its own process (see `mcp.ts`). Artemis is a client there — it can
+ * decline to call, and that is the whole of its power — so those tools carry
+ * `needsOsSandbox: false` because there is nothing here to wrap, and `server`
+ * because the approval prompt should say whose tool it is. They are not in
+ * {@link ALL_TOOLS}: the list below is what Artemis implements, and what a run
+ * is offered is that list plus whatever its servers turned out to hold.
+ *
+ * ## Windows still refuses the shell, and nothing here routes around it
+ *
+ * `commandSandbox.ts` has no Windows backend, so `shell` refuses rather than
+ * running unconfined. Neither addition above is a way past that: `http_fetch`
+ * runs nothing, and a tool server executes only what a *user* named in their
+ * profile settings — never a command line the model composed.
  *
  * ## Risk is declared, not inferred
  *
@@ -38,8 +51,11 @@ import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import { HTTP_FETCH, httpFetch } from './httpFetch.js';
 import { confineToRoots, SandboxViolation } from './sandbox.js';
 import type { SandboxRoot } from './sandbox.js';
+
+export { HTTP_FETCH } from './httpFetch.js';
 
 const run = promisify(execFile);
 
@@ -101,6 +117,15 @@ export interface ToolContext {
    * call site, where the approval policy can see it.
    */
   readonly shell: (command: string, signal: AbortSignal) => Promise<ToolResult>;
+  /**
+   * Whether this run may reach a private address with {@link HTTP_FETCH}.
+   *
+   * Decided by the permission mode rather than by a setting, and the reasoning
+   * is in `httpFetch.ts`: it turns on whether a person is seeing each address
+   * before it is fetched. Absent reads as `false`, which is the safe direction
+   * for a caller that has not thought about it.
+   */
+  readonly allowPrivateNetwork?: boolean;
   /**
    * Call a tool one of this run's tool servers performs.
    *
@@ -240,7 +265,14 @@ export const SHELL: ToolSpec = {
   needsOsSandbox: true,
 };
 
-export const ALL_TOOLS: readonly ToolSpec[] = [READ_FILE, WRITE_FILE, LIST_FILES, SEARCH, SHELL];
+export const ALL_TOOLS: readonly ToolSpec[] = [
+  READ_FILE,
+  WRITE_FILE,
+  LIST_FILES,
+  SEARCH,
+  HTTP_FETCH,
+  SHELL,
+];
 
 /** The tools available under a sandbox that forbids writing. */
 export function toolsForRisk(allowWrite: boolean, allowExecute: boolean): readonly ToolSpec[] {
@@ -298,6 +330,11 @@ export async function executeTool(
         return await doList(args, context);
       case SEARCH.name:
         return await doSearch(args, context);
+      case HTTP_FETCH.name:
+        return await httpFetch(args, {
+          signal: context.signal,
+          allowPrivateNetwork: context.allowPrivateNetwork === true,
+        });
       case SHELL.name:
         return await context.shell(requireString(args, 'command'), context.signal);
       default:

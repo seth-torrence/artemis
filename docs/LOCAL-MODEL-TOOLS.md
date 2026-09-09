@@ -30,7 +30,8 @@ what the permission modes do to all of them.
   asking about `shell` and about **every tool server**, because that mode's
   bargain is about edits to this working directory — which you are looking at
   and git can undo — and a server acts on a repository, a vault or a live page,
-  where the next click cannot.
+  where the next click cannot. For the same reason it is the one mode in which
+  `http_fetch` will not reach a private address; see below.
 * **bypassPermissions** stops asking. It does *not* widen the OS sandbox; those
   are separate axes on purpose.
 
@@ -291,21 +292,33 @@ The rule is the permission mode:
 | Mode | Loopback, RFC1918, link-local, `.internal`, tailnet CGNAT |
 | --- | --- |
 | `plan` | tool not offered at all |
-| `default` | **allowed** — every call is approved by hand anyway |
-| `acceptEdits` | **allowed** |
-| `bypassPermissions` | **allowed** |
+| `default` | **allowed** — every call is approved by hand |
+| `acceptEdits` | **refused** |
+| `bypassPermissions` | **allowed** — you said not to ask |
 
-…with one exception that is never allowed in any mode: the cloud metadata
-addresses (`169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254`).
-Those exist only to hand out credentials, and no run has a legitimate reason to
-read them.
+Private addresses are allowed at all because of who this is for: a local model
+on a homelab, whose useful endpoints are a Home Assistant on a LAN address and a
+handful of services on a tailnet. A tool that refused those would be a tool that
+could reach the public internet and not the user's own machines, which is
+precisely backwards.
 
-Private addresses are allowed rather than blocked because of who this feature is
-for: a local model on a homelab, whose useful endpoints are a Home Assistant on
-a LAN address and a handful of services on a tailnet. A tool that refused those
-would be a tool that could reach the public internet and not the user's own
-machines, which is precisely backwards. The gate that matters is the approval
-prompt, and in `default` mode there is one per call.
+The gate is therefore *whether a person saw the address*. In `default` there is
+a prompt per call. `bypassPermissions` is you saying you have decided.
+`acceptEdits` is neither: its bargain is "stop asking me about edits to this
+working directory", it was never a decision about the network, and letting an
+unattended turn reach the LAN under it would be exactly the scope creep the
+permission modes exist to prevent. The same reasoning keeps `acceptEdits` from
+auto-allowing a tool server.
+
+One thing is refused in **every** mode: the cloud metadata addresses
+(`169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254`). They exist only
+to hand out credentials, and no run has a legitimate reason to read one.
+
+Classification resolves the name and checks every answer, and every redirect hop
+is checked again — an open redirect to `169.254.169.254` is a real technique.
+What it does *not* claim is protection from determined DNS rebinding: `fetch`
+resolves again when it connects, and nothing pins the socket to the address that
+was checked.
 
 ---
 

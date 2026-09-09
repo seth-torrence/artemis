@@ -860,6 +860,20 @@ class LocalRun implements Run {
               }),
           env: sandboxEnv(this.#input.env, []),
           signal: this.#abort.signal,
+          /*
+           * A private address is reachable when someone is watching, or when
+           * they have said not to ask.
+           *
+           * `default` prompts for every `http_fetch`, so the address is on
+           * screen before it is fetched; `bypassPermissions` is the user
+           * saying they have decided. `acceptEdits` is neither — its bargain
+           * is about edits to this directory, not about the network — so an
+           * unattended turn under it stays off the LAN. `plan` never reaches
+           * here, because the tool is not offered. See `httpFetch.ts`.
+           */
+          allowPrivateNetwork:
+            (this.#input.permissionMode ?? 'default') === 'default' ||
+            this.#input.permissionMode === 'bypassPermissions',
           shell: (command, signal) => this.#shell(command, signal),
           // Only when there is something to call. Absent, `executeTool` keeps
           // answering "no tool called that exists", which on a run with no
