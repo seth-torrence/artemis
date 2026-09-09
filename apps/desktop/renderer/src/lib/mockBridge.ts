@@ -149,6 +149,7 @@ const CLAUDE_CAPS: Capabilities = {
   rewind: true,
   usageReporting: true,
   costReporting: true,
+  contextReporting: true,
   planUsageReporting: true,
   systemPromptAppend: true,
   imageInput: true,
@@ -172,6 +173,7 @@ const CODEX_CAPS: Capabilities = {
   rewind: false,
   usageReporting: true,
   costReporting: false,
+  contextReporting: true,
   // True, as the real adapter declares: Codex answers `account/rateLimits/read`
   // like Claude answers its own. What differs is the *shape* of the answer —
   // see `mockCodexPlanUsage`.

@@ -228,6 +228,7 @@ export const CLAUDE_CAPABILITIES: Capabilities = {
   rewind: true, // `Options.resumeSessionAt`, resolved from the stored chain
   usageReporting: true, // `result.usage` / `result.modelUsage`
   costReporting: true, // `total_cost_usd` / `ModelUsage.costUSD`
+  contextReporting: true, // `ModelUsage.contextWindow`, and prompt size on the deltas
   planUsageReporting: true, // the SDK's structured `/usage` control request
   systemPromptAppend: true, // `{ type: 'preset', preset: 'claude_code', append }`
   imageInput: true, // base64 `image` blocks in the user message's content
