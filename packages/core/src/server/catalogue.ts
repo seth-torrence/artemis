@@ -393,4 +393,5 @@ const EMPTY_CAPABILITIES = {
   systemPromptAppend: false,
   imageInput: false,
   fileInput: false,
+  taskSuggestions: false,
 } as const;

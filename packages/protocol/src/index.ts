@@ -32,6 +32,7 @@
  * | `sharedConfig`  | what a shared `~/.claude` covers, and how to describe it    |
  * | `github`        | `parsePullRequestUrl`, `PullRequestSummary`                 |
  * | `agentPrompts`  | the standing-instruction library, and how it composes       |
+ * | `suggestedTasks`| the follow-up work an agent offers, and where it can be run  |
  * | `secretRefs`    | addressing a secret held by a key manager, without holding it |
  * | `ipc`           | channel constants, request/response maps, `ArtemisBridge`    |
  *
@@ -66,5 +67,6 @@ export * from './forge.js';
 export * from './github.js';
 export * from './update.js';
 export * from './agentPrompts.js';
+export * from './suggestedTasks.js';
 export * from './secretRefs.js';
 export * from './ipc.js';

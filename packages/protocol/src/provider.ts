@@ -255,6 +255,27 @@ export interface Capabilities {
    * reason attached.
    */
   readonly systemPromptAppend: boolean;
+
+  /**
+   * The agent can be handed Artemis's own tools, so it can offer follow-up
+   * work at the end of a turn — see `@rx-artemis/protocol`'s `suggestedTasks`.
+   *
+   * A statement about the *transport*, in the same sense as {@link imageInput}:
+   * it says this provider has somewhere to put a tool Artemis defines, whose
+   * handler runs in Artemis's own process. Everything the feature needs follows
+   * from that — the suggestion is a tool call, so it is in the provider's
+   * transcript, so it replays, so the chips come back after a reload.
+   *
+   * A flag rather than a guess, because the failure without one is silent in
+   * both directions. A provider that cannot take host tools simply never offers
+   * a task, which is indistinguishable from an agent that had nothing to
+   * suggest — so the UI would have no way to tell "nothing today" from "never,
+   * here" and would go on implying the feature was working. And the control
+   * this gates is not a button the user presses: there is nothing to disable
+   * and nothing to explain in place, which is why the honest surface is the
+   * provider row rather than a greyed chip that could never appear.
+   */
+  readonly taskSuggestions: boolean;
 }
 
 /**
@@ -284,6 +305,7 @@ export const NO_CAPABILITIES: Capabilities = {
   systemPromptAppend: false,
   imageInput: false,
   fileInput: false,
+  taskSuggestions: false,
 };
 
 /**
