@@ -680,6 +680,35 @@ describe('TranscriptModel activity groups', () => {
       expect(model.getRowsSnapshot()).toEqual(['k:m1:0', 'a:m1:1', 'k:m2:0']);
     });
 
+    it('stands a parked ask between two stretches, and gives the second its own row', () => {
+      // The agent thinks, stops to ask, and thinks on once the answer lands.
+      // The card keeps the place it was asked in: the reasoning after it is a
+      // fresh row beneath the card, never more of the fold above it — that
+      // fold would otherwise grow under the reader while the card sat at the
+      // bottom of thinking the agent did after the question was answered.
+      const model = build();
+      for (const event of stream(
+        thought('m1', 0, 'two libraries would do; better ask'),
+        {
+          type: 'permission.request',
+          requestId: 'ask-1',
+          request: { id: 'ask-1', runId: RUN, toolName: 'AskUserQuestion', input: {}, requestedAt: 1 },
+        },
+        { type: 'permission.resolved', requestId: 'ask-1', outcome: 'allowed' },
+        thought('m1', 1, 'luxon it is'),
+      )) {
+        model.apply(event);
+      }
+      model.flush();
+
+      expect(model.getRowsSnapshot()).toEqual(['k:m1:0', 'p:ask-1', 'k:m1:1']);
+      expect(model.getItem('k:m1:0')).toMatchObject({
+        text: 'two libraries would do; better ask',
+        streaming: false,
+      });
+      expect(model.getItem('k:m1:1')).toMatchObject({ text: 'luxon it is', streaming: true });
+    });
+
     it('never merges a redaction into prose, or prose into a redaction', () => {
       const model = build();
       for (const event of stream(

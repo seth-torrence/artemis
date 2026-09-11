@@ -689,8 +689,19 @@ class ArtemisRun implements Run {
       endReason: undefined,
       remoteError: undefined,
       thinking: (text) => {
+        /*
+         * The server sets two of the provider's reasoning blocks apart with a
+         * paragraph break, because on its flat stream that is the only way to
+         * keep the last word of one off the first word of the next. At the
+         * head of a block of this run's own — the first fragment after an
+         * answer, or after a parked ask — the break separates nothing, and
+         * would stand as blank lines at the top of a fresh fold.
+         */
+        const fresh = blockKind !== 'thinking';
+        const fragment = fresh ? text.replace(/^\n+/, '') : text;
+        if (fragment === '') return;
         open('thinking');
-        this.#emit({ type: 'thinking.delta', messageId, blockIndex, text } as never);
+        this.#emit({ type: 'thinking.delta', messageId, blockIndex, text: fragment } as never);
       },
       text: (text) => {
         open('text');
@@ -769,7 +780,28 @@ class ArtemisRun implements Run {
     // Learned like the session id: the server announces it once and early,
     // and every native run route addresses it from here on.
     if (extensions?.runId !== undefined) this.#remoteRunId = extensions.runId as RunId;
-    if (extensions?.permission !== undefined) this.#notePermission(extensions.permission);
+    /*
+     * A park stands in the thread where it was raised, so the block in
+     * progress closes before the card is drawn.
+     *
+     * The wire has no blocks (see the class comment), and this run makes them
+     * by kind: reasoning, then answer, then reasoning again. A question the
+     * agent stopped to ask is a boundary of the same weight — the thinking
+     * before it and the thinking after it are two stretches with a decision
+     * between them — but it is not a change of kind, so without this the
+     * reasoning that resumes once the answer lands carried the *same* block
+     * index as the reasoning before the ask. The transcript keys a block by
+     * (message, index) and writes a later delta back into the row it opened,
+     * so every thought the agent had after the question was appended to the
+     * fold above the card, and the card read as the last thing in a stretch
+     * of reasoning it was actually in the middle of. Closing here is what a
+     * tool call does to a block on a local run: the next fragment of either
+     * kind opens a fresh one, and the card keeps the place it was asked in.
+     */
+    if (extensions?.permission !== undefined) {
+      if (extensions.permission.status === 'requested') stream.close();
+      this.#notePermission(extensions.permission);
+    }
     // The whole live set, re-stamped onto this run so the renderer files the
     // rows under the conversation it is drawing. Remembered on the adapter
     // too, keyed by session, so the rows outlive the turn — see

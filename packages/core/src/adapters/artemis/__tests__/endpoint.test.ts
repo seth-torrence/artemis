@@ -794,6 +794,207 @@ describe('a live run: steering, interrupting and answering', () => {
     expect(answer?.authorization).toBe('Bearer tok');
     expect(answer?.body).toEqual({ requestId: 'perm-1', decision: { behavior: 'allow', scope: 'once' } });
   });
+  it('keeps a parked ask where it was asked: the reasoning after it is a new block', async () => {
+    // The agent thinks, stops to ask, and thinks again once the answer lands.
+    // On the wire that is reasoning, a permission chunk, reasoning — the same
+    // kind either side of the park, which used to mean the same block index:
+    // the transcript writes a later delta of a block back into the row it
+    // opened, so everything the agent thought *after* the question was
+    // appended to the fold above the card, and the card read as the end of
+    // the reasoning it was asked in the middle of. A park closes the block.
+    let completion: ServerResponse | undefined;
+    const { origin } = await serve((request, response) => {
+      if (request.url === '/v1/chat/completions') {
+        completion = response;
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+        response.write(sse(chunk({ role: 'assistant' }, { artemis: { runId: 'srv-4' } })));
+        response.write(sse(chunk({ reasoning_content: 'Two libraries would do. ' })));
+        response.write(sse(chunk({ reasoning_content: 'Better ask.' })));
+        response.write(
+          sse(
+            chunk(
+              {},
+              {
+                artemis: {
+                  permission: {
+                    status: 'requested',
+                    request: {
+                      id: 'ask-1',
+                      runId: 'srv-4',
+                      toolName: 'AskUserQuestion',
+                      input: {},
+                      requestedAt: 1,
+                      question: {
+                        questions: [
+                          {
+                            question: 'Which library?',
+                            header: 'Library',
+                            multiSelect: false,
+                            options: [
+                              { label: 'date-fns', description: 'one' },
+                              { label: 'Luxon', description: 'two' },
+                            ],
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            ),
+          ),
+        );
+        return; // parks; the answer arrives on the run route, below
+      }
+      if (request.url === '/api/v0/runs/srv-4/permission') {
+        completion?.write(
+          sse(
+            chunk(
+              {},
+              {
+                artemis: {
+                  permission: {
+                    status: 'resolved',
+                    requestId: 'ask-1',
+                    outcome: 'allowed',
+                  },
+                },
+              },
+            ),
+          ),
+        );
+        // The serving side sets the provider's next reasoning block apart
+        // with a paragraph break, as it does between any two blocks.
+        completion?.write(sse(chunk({ reasoning_content: '\n\nLuxon it is.' })));
+        completion?.write(sse(chunk({ content: 'Using Luxon.' })));
+        completion?.write(
+          sse(chunk({}, { finish_reason: 'stop', artemis: { sessionId: 'sess-q', endReason: 'completed' } })),
+        );
+        completion?.write(sse('[DONE]'));
+        completion?.end();
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ requestId: 'ask-1' }));
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+
+    const adapter = createArtemisAdapter();
+    const run = await adapter.createRun({
+      ...base,
+      runId: 'run-ask' as RunId,
+      env: { [LOCAL_BASE_URL_ENV]: origin, [LOCAL_API_KEY_ENV]: 'tok' },
+    } as ResolvedRunInput);
+
+    const events: AgentEvent[] = [];
+    for await (const event of run.events) {
+      events.push(event);
+      if (event.type === 'permission.request') {
+        void run.respondToPermission(event.requestId, {
+          behavior: 'allow',
+          scope: 'once',
+          answers: [{ question: 'Which library?', options: ['Luxon'] }],
+        });
+      }
+    }
+
+    const story = events
+      .filter((event) => event.type !== 'session.started' && event.type !== 'run.end')
+      .map((event) => {
+        const { type, blockIndex, text } = event as { type: string; blockIndex?: number; text?: string };
+        return blockIndex === undefined ? { type } : { type, blockIndex, text };
+      });
+
+    expect(story).toEqual([
+      { type: 'thinking.delta', blockIndex: 0, text: 'Two libraries would do. ' },
+      { type: 'thinking.delta', blockIndex: 0, text: 'Better ask.' },
+      { type: 'permission.request' },
+      { type: 'permission.resolved' },
+      // A fresh block, so the transcript opens a fresh row under the card —
+      // and the server's break between the two blocks is not carried to the
+      // head of it, where it would separate nothing.
+      { type: 'thinking.delta', blockIndex: 1, text: 'Luxon it is.' },
+      { type: 'text.delta', blockIndex: 2, text: 'Using Luxon.' },
+      { type: 'text.complete', blockIndex: 2, text: 'Using Luxon.' },
+    ]);
+  });
+
+  it('closes an answer in progress when the agent stops to ask, and finalises it', async () => {
+    // The same boundary on the answer's side: what the agent said before the
+    // question is one block, finalised with its `text.complete`, and what it
+    // says after is the next — not more of the same paragraph above the card.
+    let completion: ServerResponse | undefined;
+    const { origin } = await serve((request, response) => {
+      if (request.url === '/v1/chat/completions') {
+        completion = response;
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+        response.write(sse(chunk({ role: 'assistant' }, { artemis: { runId: 'srv-5' } })));
+        response.write(sse(chunk({ content: 'One thing first.' })));
+        response.write(
+          sse(
+            chunk(
+              {},
+              {
+                artemis: {
+                  permission: {
+                    status: 'requested',
+                    request: { id: 'perm-5', runId: 'srv-5', toolName: 'Bash', input: { command: 'ls' }, requestedAt: 1 },
+                  },
+                },
+              },
+            ),
+          ),
+        );
+        return;
+      }
+      if (request.url === '/api/v0/runs/srv-5/permission') {
+        completion?.write(
+          sse(chunk({}, { artemis: { permission: { status: 'resolved', requestId: 'perm-5', outcome: 'allowed' } } })),
+        );
+        completion?.write(sse(chunk({ content: 'Done.' })));
+        completion?.write(sse(chunk({}, { finish_reason: 'stop', artemis: { sessionId: 'sess-5', endReason: 'completed' } })));
+        completion?.write(sse('[DONE]'));
+        completion?.end();
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ requestId: 'perm-5' }));
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+
+    const adapter = createArtemisAdapter();
+    const run = await adapter.createRun({
+      ...base,
+      runId: 'run-5' as RunId,
+      env: { [LOCAL_BASE_URL_ENV]: origin, [LOCAL_API_KEY_ENV]: 'tok' },
+    } as ResolvedRunInput);
+
+    const events: AgentEvent[] = [];
+    for await (const event of run.events) {
+      events.push(event);
+      if (event.type === 'permission.request') {
+        void run.respondToPermission(event.requestId, { behavior: 'allow', scope: 'once' });
+      }
+    }
+
+    const story = events
+      .filter((event) => event.type !== 'session.started' && event.type !== 'run.end')
+      .map((event) => {
+        const { type, blockIndex, text } = event as { type: string; blockIndex?: number; text?: string };
+        return blockIndex === undefined ? { type } : { type, blockIndex, text };
+      });
+
+    expect(story).toEqual([
+      { type: 'text.delta', blockIndex: 0, text: 'One thing first.' },
+      { type: 'text.complete', blockIndex: 0, text: 'One thing first.' },
+      { type: 'permission.request' },
+      { type: 'permission.resolved' },
+      { type: 'text.delta', blockIndex: 1, text: 'Done.' },
+      { type: 'text.complete', blockIndex: 1, text: 'Done.' },
+    ]);
+  });
 });
 
 describe('the remote decision guard', () => {
