@@ -40,6 +40,7 @@ const ALL_SECTIONS: readonly SettingsSection[] = [
   'permissions',
   'agents',
   'cerebro',
+  'memory-banks',
   'secrets',
   'server',
   'remote',
@@ -58,7 +59,10 @@ describe('the two-band nav', () => {
 
   it('holds the sections in their argued order', () => {
     expect(SETTINGS_NAV.map((band) => band.sections.map((s) => s.id))).toEqual([
-      ['profiles', 'models', 'runs', 'agents', 'permissions', 'appearance'],
+      // Memory banks directly under Instructions: the same question answered
+      // by a repository rather than by a paragraph, and the pane the built-in
+      // prompt in Instructions sends people to.
+      ['profiles', 'models', 'runs', 'agents', 'memory-banks', 'permissions', 'appearance'],
       // Key managers opens the second band because it is what the first one
       // reaches for: Instructions offers a bank "from a key manager", and this
       // is the pane behind that offer. Remote directly under Server: the same
@@ -80,6 +84,15 @@ describe('the two-band nav', () => {
     expect(labels.get('advanced')).toBe('This machine');
   });
 
+  it('shows the banks under their own name, not the CLI’s', () => {
+    // `memory-banks` is the first id in this dialog whose label and address
+    // agree, and it is deliberate: nobody has deep-linked it yet, so there is
+    // nothing to keep faith with. `cerebro` is the address that has history.
+    const banks = SETTINGS_NAV.flatMap((band) => band.sections).find(
+      (section) => section.id === 'memory-banks',
+    );
+    expect(banks?.label).toBe('Memory banks');
+  });
 });
 
 describe('ids are frozen addresses', () => {
@@ -91,10 +104,12 @@ describe('ids are frozen addresses', () => {
   });
 
   it('sends the historical addresses to their merged homes', () => {
-    // The browser switches are permission questions now; the banks are the
-    // instance half of Instructions. Everything else answers for itself.
+    // The browser switches are permission questions now. `cerebro` is the
+    // CLI's name for a pane that is no longer about the CLI: it followed the
+    // banks into Instructions and out again, and it still has to land on them
+    // wherever they are. Everything else answers for itself.
     expect(resolveSettingsSection('browser')).toBe('permissions');
-    expect(resolveSettingsSection('cerebro')).toBe('agents');
+    expect(resolveSettingsSection('cerebro')).toBe('memory-banks');
     for (const id of ALL_SECTIONS) {
       if (id === 'browser' || id === 'cerebro') continue;
       expect(resolveSettingsSection(id)).toBe(id);
@@ -114,7 +129,16 @@ describe('openSettings, aimed at an address', () => {
   it('opens the resolved pane, not the address', () => {
     openSettings('cerebro');
     expect(useApp.getState().screen).toBe('profiles');
-    expect(useApp.getState().settingsSection).toBe('agents');
+    expect(useApp.getState().settingsSection).toBe('memory-banks');
+  });
+
+  it('keeps the banks’ own deep link working after the pane moved', () => {
+    // The call the command palette made for a year, and the shape anything
+    // else that linked the banks will have copied: a historical id plus the
+    // anchor inside it. Both halves still have to arrive.
+    openSettings('cerebro', { row: 'memory-banks' });
+    expect(useApp.getState().settingsSection).toBe('memory-banks');
+    expect(useApp.getState().settingsRow).toBe('memory-banks');
   });
 
   it('carries a row anchor when given one, and drops it when not', () => {

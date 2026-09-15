@@ -164,6 +164,11 @@ let saved: { prompts: unknown[]; dismissedBuiltIns?: unknown }[] = [];
         banks: [
           {
             slug: 'team',
+            name: 'team',
+            description: null,
+            format: 'manifest',
+            profiles: { kind: 'all' },
+            problems: [],
             path: '/x/team',
             remote: null,
             role: 'readwrite',
@@ -172,6 +177,7 @@ let saved: { prompts: unknown[]; dismissedBuiltIns?: unknown }[] = [];
             exists: banksAvailable,
             source: null,
             memories: 0,
+            mirrored: 0,
             validationErrors: 0,
             projects: 0,
           },
@@ -468,9 +474,33 @@ describe("Artemis's own prompts", () => {
 
   it('says a built-in is being sent when its precondition holds', async () => {
     // The other half, and the one that fails if the availability stub is wired
-    // to nothing: both rows have to reach the "sent" line, not just the user's.
+    // to nothing: the banks row has to reach a "sent" line of its own, beside
+    // the user's prompt saying where it goes.
     await renderLoaded();
-    await waitFor(() => expect(screen.getAllByText(/Sent to every profile/)).toHaveLength(2));
+    await waitFor(() =>
+      expect(screen.getAllByText(/Sent with every bank the run’s profile carries/).length).toBeGreaterThan(0),
+    );
+    expect(screen.getAllByText(/Sent to every profile/)).toHaveLength(1);
+  });
+
+  it('gives the banks prompt no scope picker, because the banks own that answer', async () => {
+    // The prompt is rendered per run out of the banks the run's profile
+    // carries, so "which profiles" is already answered — one bank at a time,
+    // in the Memory banks pane. A picker here would be a second answer, and
+    // the two would disagree the first time anyone used both.
+    await renderLoaded();
+    open(MEMORY_BANKS_PROMPT_NAME);
+
+    expect(screen.queryByText('Every profile')).toBeNull();
+    expect(screen.getByText(/Attach banks to profiles under Memory banks/)).toBeTruthy();
+  });
+
+  it('still gives a prompt the user wrote its own scope picker', async () => {
+    // The exemption is one prompt's, not built-ins' as a class and certainly
+    // not the library's.
+    await renderLoaded();
+    open('House style');
+    expect(screen.getByText('Every profile')).toBeTruthy();
   });
 });
 

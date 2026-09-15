@@ -489,17 +489,27 @@ export const IPC = {
   memoryBankSync: 'artemis:memory-banks:sync',
   memoryBankRetire: 'artemis:memory-banks:retire',
   /**
-   * Wire one bank on or off — the machine's wiring, not Artemis's gate.
+   * Switch one bank on or off — this bank, not Artemis's master gate.
    *
-   * Runs the CLI's per-bank `enable`/`disable`: the profile block and install
-   * namespace for that bank come or go, and the CLI records the flag in its
-   * own config, where the SessionStart hook (stock Claude Code's path) reads
-   * it too. One switch per bank, honoured everywhere.
+   * On installs the bank into every project it reaches and describes it to
+   * runs; off removes those copies and stops describing it. The flag is
+   * recorded in Artemis's registry and mirrored into the CLI's config, where
+   * the SessionStart hook (stock Claude Code's path) reads it too, so one
+   * switch per bank is honoured on both paths.
    */
   memoryBankSetEnabled: 'artemis:memory-banks:set-enabled',
   /**
+   * Which profiles a bank reaches: every profile, or a chosen set.
+   *
+   * The scope decides everything downstream — which runs are briefed about
+   * the bank, which profiles' projects it is installed into, which runs may
+   * read its directory. Artemis's own record, in its own registry; the CLI's
+   * config has no room for it and does not need any.
+   */
+  memoryBankSetProfiles: 'artemis:memory-banks:set-profiles',
+  /**
    * Drop a bank from this machine: unwire it, remove its installed copies,
-   * forget it in the CLI config. The repository itself stays on disk — the
+   * forget it in the registry. The repository itself stays on disk — the
    * renderer cannot delete a git repo through this channel, deliberately.
    */
   memoryBankForget: 'artemis:memory-banks:forget',
@@ -2343,6 +2353,8 @@ export interface UpdatesCheckResponse {
  */
 export interface MemoryBankMemory {
   readonly name: string;
+  /** The name as a heading, the way the index lists it. */
+  readonly title: string;
   readonly type: string;
   readonly description: string;
   readonly body: string;
@@ -2353,6 +2365,19 @@ export interface MemoryBankMemory {
   readonly org: string | null;
   /** Project or topic within the org. */
   readonly project: string | null;
+  /**
+   * The labels the memory's folders carry, in the bank's own vocabulary —
+   * `{ org, project }` for a cortex-shaped bank, `{ brand, system }` for a
+   * brand-first one, empty for a flat one. `org` and `project` above are the
+   * same facts for a bank that uses those words.
+   */
+  readonly scope: Readonly<Record<string, string>>;
+  /**
+   * Why the bank's reader would not install this memory. Empty for a memory
+   * that reaches agents; a memory with problems is browsable here so the
+   * person who can fix it can see what is wrong.
+   */
+  readonly problems: readonly string[];
   /**
    * From a read-only mirror tree the bank carries but does not own (cortex's
    * session-memory mirrors, for instance): browsable and searchable here,
@@ -2370,11 +2395,39 @@ export interface MemoryBankMemory {
 export type MemoryBankRole = 'readwrite' | 'readonly';
 
 /**
- * One configured bank, as the CLI's registry and a status probe describe it.
+ * Which profiles a bank reaches. The same two answers the prompt library's
+ * scope gives, for the same reason: `all` covers an account added next month,
+ * a list means exactly these.
+ */
+export type MemoryBankProfileScope =
+  | { readonly kind: 'all' }
+  | { readonly kind: 'profiles'; readonly profileIds: readonly ProfileId[] };
+
+/**
+ * How a bank is kept on disk. `manifest` means a `BANK.md` at its root; the
+ * two legacy formats are the `cerebro` CLI's, read unchanged. `null` when the
+ * path holds no bank at all.
+ */
+export type MemoryBankFormat = 'legacy-flat' | 'legacy-projects' | 'manifest';
+
+/**
+ * One configured bank, as Artemis's registry and a read of the bank describe it.
  */
 export interface MemoryBankInfo {
   /** The per-machine name; namespaces the bank's installs and prompts. */
   readonly slug: string;
+  /** What the bank calls itself in its manifest. The slug when it says nothing. */
+  readonly name: string;
+  /** One line on what it holds, from its manifest. */
+  readonly description: string | null;
+  readonly format: MemoryBankFormat | null;
+  readonly profiles: MemoryBankProfileScope;
+  /**
+   * What is wrong with the bank as a whole (an unreadable manifest, say) and
+   * with its entries, one line each, `file: reason` — the first few, since the
+   * count is in `validationErrors`.
+   */
+  readonly problems: readonly string[];
   readonly path: string;
   readonly remote: string | null;
   readonly role: MemoryBankRole;
@@ -2659,6 +2712,14 @@ export interface MemoryBankSetEnabledRequest {
 }
 
 export type MemoryBankSetEnabledResponse = MemoryBankActionResponse;
+
+/** Attach one bank to every profile, or to a chosen set. See `IPC.memoryBankSetProfiles`. */
+export interface MemoryBankSetProfilesRequest {
+  readonly slug: string;
+  readonly profiles: MemoryBankProfileScope;
+}
+
+export type MemoryBankSetProfilesResponse = MemoryBankActionResponse;
 
 /** Unwire, uninstall, and forget one bank. The repository stays on disk. */
 export interface MemoryBankForgetRequest {
@@ -3130,6 +3191,7 @@ export type IpcRequestMap = {
   [IPC.memoryBankSync]: MemoryBankSyncRequest;
   [IPC.memoryBankRetire]: MemoryBankRetireRequest;
   [IPC.memoryBankSetEnabled]: MemoryBankSetEnabledRequest;
+  [IPC.memoryBankSetProfiles]: MemoryBankSetProfilesRequest;
   [IPC.memoryBankForget]: MemoryBankForgetRequest;
   [IPC.memoryBanksSetMasterEnabled]: MemoryBanksSetMasterEnabledRequest;
   [IPC.secretsConnectionsList]: SecretsConnectionsListRequest;
@@ -3239,6 +3301,7 @@ export type IpcResponseMap = {
   [IPC.memoryBankSync]: MemoryBankSyncResponse;
   [IPC.memoryBankRetire]: MemoryBankRetireResponse;
   [IPC.memoryBankSetEnabled]: MemoryBankSetEnabledResponse;
+  [IPC.memoryBankSetProfiles]: MemoryBankSetProfilesResponse;
   [IPC.memoryBankForget]: MemoryBankForgetResponse;
   [IPC.memoryBanksSetMasterEnabled]: MemoryBanksSetMasterEnabledResponse;
   [IPC.secretsConnectionsList]: SecretsConnectionsListResponse;
@@ -3525,13 +3588,14 @@ export interface ArtemisBridge {
   };
 
   /**
-   * The memory banks, through the banks' own CLI.
+   * The memory banks.
    *
    * Reads and actions — and none of them lets the renderer name a path, a
-   * binary, or an arbitrary git remote outside `add`. Main resolves each
-   * bank's repo and the CLI to drive it; the banks' own validation and PR
-   * gates decide what actually lands. See the channel comments in {@link IPC}
-   * for why the write channels answer with a message rather than data.
+   * binary, or an arbitrary git remote outside `add`. Main owns each bank's
+   * location and reads the bank itself; what a write actually lands is decided
+   * by the bank's own schema and its review path. See the channel comments in
+   * {@link IPC} for why the write channels answer with a message rather than
+   * data.
    */
   readonly memoryBanks: {
     /** Every configured bank's condition. `banks: []` is an answer, not an error. */
@@ -3554,8 +3618,10 @@ export interface ArtemisBridge {
     sync(request: MemoryBankSyncRequest): Promise<IpcResult<MemoryBankSyncResponse>>;
     /** Remove a memory through the same gates. */
     retire(request: MemoryBankRetireRequest): Promise<IpcResult<MemoryBankRetireResponse>>;
-    /** Wire one bank on or off (profile blocks + CLI config flag). */
+    /** Switch one bank on or off (the registry flag, and its installs). */
     setEnabled(request: MemoryBankSetEnabledRequest): Promise<IpcResult<MemoryBankSetEnabledResponse>>;
+    /** Attach one bank to every profile, or to a chosen set. Installs follow. */
+    setProfiles(request: MemoryBankSetProfilesRequest): Promise<IpcResult<MemoryBankSetProfilesResponse>>;
     /** Unwire, uninstall, and forget one bank. The repo stays on disk. */
     forget(request: MemoryBankForgetRequest): Promise<IpcResult<MemoryBankForgetResponse>>;
     /** Artemis's master gate: prompt injection + run-start syncs. */

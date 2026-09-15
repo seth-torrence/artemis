@@ -1,16 +1,31 @@
 /**
- * Team memory banks: the part of them core is allowed to know about.
+ * Team memory banks: what core knows about them.
  *
- * Little, deliberately. The banks are driven by their own CLI from the main
- * process (`apps/desktop/main/memoryBanks.ts` says why a second implementation
- * in TypeScript would drift), so core holds no bank *logic*. It holds two
- * things: the shape of the credential store main must inject (the encryption
- * behind it is Electron's, and core may not name Electron), and the read-only
- * view of the CLI's own files — which banks this machine has and how each
- * says it is filed — because every host that composes a run's prompt needs it,
- * and the headless server is a host.
+ * More than it used to, deliberately. The banks were driven by their own CLI
+ * from the main process and core held only the credential store's shape and a
+ * read of the CLI's registry. Now core reads a bank itself — in any of the
+ * formats `formats.ts` knows — installs it into a project's memory, renders
+ * the index a session loads, keeps the machine's registry with each bank's
+ * profile scope, and describes the banks to the prompt renderer. Both hosts
+ * (the desktop and the headless server) use the same reader, so a bank means
+ * one thing on every machine that carries it.
+ *
+ * Nothing here spawns. Every function is file reads and writes, which is what
+ * lets the desktop ask on the path of every run start and lets a machine with
+ * no Python install and describe a bank.
  */
 
+export * from './bankIndex.js';
+export * from './describe.js';
+export * from './formats.js';
+export * from './frontmatter.js';
+export * from './glob.js';
+export * from './install.js';
+export * from './manifest.js';
+export * from './model.js';
 export * from './prompt.js';
 export * from './registry.js';
+export * from './registryV2.js';
+export * from './schema.js';
 export * from './secrets.js';
+export * from './sync.js';

@@ -47,8 +47,8 @@
  *
  * The value strings carry the *old* names as keywords on purpose: "browser"
  * finds Permissions & access, "advanced" finds This machine, "cerebro" finds
- * the Memory banks row. Muscle memory is a caller too, and it does not read
- * release notes.
+ * Memory banks. Muscle memory is a caller too, and it does not read release
+ * notes.
  *
  * ## Run-shaping flags are commands too
  *
@@ -555,14 +555,14 @@ function RootPage({
           Instructions and standing prompts…
         </CommandItem>
         {/*
-          A second door into the Instructions pane, kept because "memory banks"
-          and "cerebro" are what people type — and aimed one level deeper than
-          the row above through the anchor, at the banks themselves. The id is
-          the historical address; `openSettings` resolves it.
+          The banks' own pane. "cerebro" stays in the keywords because it is
+          still what people type — the CLI's name outlived the pane it named —
+          and the historical id still resolves for anyone deep-linking it, but
+          the row itself names the canonical address.
         */}
         <CommandItem
           value="settings memory banks cerebro team memories shared knowledge instructions"
-          onSelect={() => openSettings('cerebro', { row: 'memory-banks' })}
+          onSelect={() => openSettings('memory-banks')}
         >
           <BrainIcon />
           Memory banks…

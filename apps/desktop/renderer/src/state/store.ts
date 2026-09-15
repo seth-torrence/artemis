@@ -207,9 +207,9 @@ export type Screen = 'chat' | 'profiles';
  *
  * An id is an address, not a label, so ids outlive the panes they named.
  * `browser` and `cerebro` no longer have panes of their own — the browser
- * switches live under Permissions & access, the banks under Instructions — but
- * every deep link and every preferences file that says `cerebro` is still a
- * correct request, so the ids stay in the union and
+ * switches live under Permissions & access, the banks under their own
+ * `memory-banks` pane — but every deep link and every preferences file that
+ * says `cerebro` is still a correct request, so the ids stay in the union and
  * {@link resolveSettingsSection} says where each one lands today. Renaming a
  * *pane* is cheap; renaming an *address* breaks callers that were never wrong.
  */
@@ -222,6 +222,7 @@ export type SettingsSection =
   | 'permissions'
   | 'agents'
   | 'cerebro'
+  | 'memory-banks'
   | 'secrets'
   | 'server'
   | 'remote'
@@ -238,8 +239,11 @@ export type SettingsSection =
  *
  *  - `browser` — its two switches were always permission questions, and they
  *    moved in with the pane that answers the rest of them.
- *  - `cerebro` — memory banks are one instance of "what the agent is told
- *    before the conversation starts", and they live with the rule now.
+ *  - `cerebro` — the banks were folded into Instructions for a while and have
+ *    their own pane again, now that a bank carries a name, a format and a set
+ *    of profiles rather than being one paragraph under the prompt library.
+ *    The CLI's name is still what people type and deep-link, so it keeps
+ *    resolving — to `memory-banks` now, which is where the room moved.
  *
  * Everything else is its own home, including `agents` (the Instructions pane
  * kept the id it was born with) and `advanced` (the This-machine pane, same).
@@ -252,7 +256,8 @@ const SETTINGS_SECTION_HOMES: Readonly<Record<SettingsSection, SettingsSection>>
   browser: 'permissions',
   permissions: 'permissions',
   agents: 'agents',
-  cerebro: 'agents',
+  cerebro: 'memory-banks',
+  'memory-banks': 'memory-banks',
   secrets: 'secrets',
   server: 'server',
   remote: 'remote',

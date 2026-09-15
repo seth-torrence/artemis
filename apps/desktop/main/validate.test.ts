@@ -15,6 +15,7 @@ import {
   validateSessionsListAll,
   validateMemoryBankAdd,
   validateMemoryBankSetEnabled,
+  validateMemoryBankSetProfiles,
   validateMemoryBanksSetMasterEnabled,
   validateMemoryBanksVerifyRemote,
   validateSecretsConnectionDelete,
@@ -1062,6 +1063,72 @@ describe('validateMemoryBankSetEnabled', () => {
       slug: 'cerebro',
       enabled: true,
     });
+  });
+});
+
+/**
+ * The profile scope: which accounts a bank reaches.
+ *
+ * The consequences run in three directions — which runs are briefed about the
+ * bank, whose projects it is installed into, and which runs may read its
+ * directory — so the shape is checked rather than trusted, and a list that
+ * repeats an id is understood rather than refused.
+ */
+describe('validateMemoryBankSetProfiles', () => {
+  it('takes the two scopes the protocol names', () => {
+    expect(validateMemoryBankSetProfiles({ slug: 'cortex', profiles: { kind: 'all' } })).toEqual({
+      slug: 'cortex',
+      profiles: { kind: 'all' },
+    });
+    expect(
+      validateMemoryBankSetProfiles({ slug: 'cortex', profiles: { kind: 'profiles', profileIds: ['work'] } }),
+    ).toEqual({ slug: 'cortex', profiles: { kind: 'profiles', profileIds: ['work'] } });
+  });
+
+  it('reads an empty list as a bank that reaches nobody, not as `all`', () => {
+    // The dangerous default. A scope that fell back to `all` would put a bank
+    // the user has just detached from every profile in front of every run.
+    expect(
+      validateMemoryBankSetProfiles({ slug: 'cortex', profiles: { kind: 'profiles', profileIds: [] } }),
+    ).toEqual({ slug: 'cortex', profiles: { kind: 'profiles', profileIds: [] } });
+    expect(
+      validateMemoryBankSetProfiles({ slug: 'cortex', profiles: { kind: 'profiles' } }),
+    ).toEqual({ slug: 'cortex', profiles: { kind: 'profiles', profileIds: [] } });
+  });
+
+  it('deduplicates rather than refusing a list that names a profile twice', () => {
+    expect(
+      validateMemoryBankSetProfiles({
+        slug: 'cortex',
+        profiles: { kind: 'profiles', profileIds: ['work', 'work', 'home'] },
+      }),
+    ).toEqual({ slug: 'cortex', profiles: { kind: 'profiles', profileIds: ['work', 'home'] } });
+  });
+
+  it('refuses a scope that is not one of the two, and a slug outside the grammar', () => {
+    expect(() => validateMemoryBankSetProfiles({ slug: 'cortex', profiles: { kind: 'some' } })).toThrow(
+      ValidationError,
+    );
+    expect(() => validateMemoryBankSetProfiles({ slug: 'cortex' })).toThrow(ValidationError);
+    expect(() => validateMemoryBankSetProfiles({ slug: '../etc', profiles: { kind: 'all' } })).toThrow(
+      ValidationError,
+    );
+  });
+
+  it('caps the list, and refuses an id that is not a string or is too long', () => {
+    const many = Array.from({ length: 51 }, (_unused, index) => `p${String(index)}`);
+    expect(() =>
+      validateMemoryBankSetProfiles({ slug: 'cortex', profiles: { kind: 'profiles', profileIds: many } }),
+    ).toThrow(ValidationError);
+    expect(() =>
+      validateMemoryBankSetProfiles({ slug: 'cortex', profiles: { kind: 'profiles', profileIds: [42] } }),
+    ).toThrow(ValidationError);
+    expect(() =>
+      validateMemoryBankSetProfiles({
+        slug: 'cortex',
+        profiles: { kind: 'profiles', profileIds: ['x'.repeat(65)] },
+      }),
+    ).toThrow(ValidationError);
   });
 });
 

@@ -1,18 +1,21 @@
 /**
- * A subagent that outlives its turn must still be seen to finish, served too.
+ * What the server's composition root puts around a served run.
  *
- * Driven through the server's own composition root — `createHeadlessHost` —
- * with the SDK replaced by a scripted transport, so what is exercised is the
- * chain a served client hangs off: host → registry → Claude adapter → the
- * registry's fan-out, which is where the wire picks events up.
+ * Driven through `createHeadlessHost` itself — with the SDK replaced by a
+ * scripted transport, so what is exercised is the chain a served client hangs
+ * off: host → registry → Claude adapter → the registry's fan-out, which is
+ * where the wire picks events up. Two things are asked of it here: that a
+ * subagent outliving its turn is still seen to finish, and that this machine's
+ * memory banks reach every path that starts a run.
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent } from '@rx-artemis/protocol';
+import type { AgentEvent, ProviderId, RoutineDraft, ServerConnection } from '@rx-artemis/protocol';
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 const sdkMock = vi.hoisted(() => ({
@@ -38,7 +41,7 @@ vi.mock(sdk.path, () => ({
 }));
 
 const { createHeadlessHost } = await import('./host.js');
-const { AsyncQueue } = await import('@rx-artemis/core');
+const { AsyncQueue, REGISTRY_V2_FILE, projectKey, workspaceKeyFor } = await import('@rx-artemis/core');
 
 class FakeQuery {
   readonly messages = new AsyncQueue<SDKMessage>();
@@ -58,21 +61,39 @@ class FakeQuery {
   }
 }
 
-function installQuery() {
-  let captured: { fake: FakeQuery; prompt: AsyncIterable<SDKUserMessage> } | undefined;
+/**
+ * @param onQuery observed at the instant the SDK is called, which is *during*
+ *   the start — the only way to assert that something happened before a run
+ *   rather than merely by the time the test looked.
+ */
+function installQuery(onQuery?: () => void) {
+  let captured:
+    | { fake: FakeQuery; prompt: AsyncIterable<SDKUserMessage>; options: Record<string, unknown> }
+    | undefined;
   sdkMock.onQuery = (params) => {
     const fake = new FakeQuery();
-    captured = { fake, prompt: params.prompt as AsyncIterable<SDKUserMessage> };
+    captured = {
+      fake,
+      prompt: params.prompt as AsyncIterable<SDKUserMessage>,
+      options: (params.options ?? {}) as Record<string, unknown>,
+    };
+    onQuery?.();
     return fake;
   };
+  const latest = () => {
+    if (captured === undefined) throw new Error('query() was never called');
+    return captured;
+  };
   return {
-    fake: () => {
-      if (captured === undefined) throw new Error('query() was never called');
-      return captured.fake;
-    },
-    prompts: () => {
-      if (captured === undefined) throw new Error('query() was never called');
-      return captured.prompt[Symbol.asyncIterator]();
+    fake: () => latest().fake,
+    prompts: () => latest().prompt[Symbol.asyncIterator](),
+    options: () => latest().options,
+    /** The text appended to the provider's preset, or `undefined` for none. */
+    append: (): string | undefined => {
+      const spec = latest().options['systemPrompt'];
+      if (typeof spec !== 'object' || spec === null) return undefined;
+      const append = (spec as { append?: unknown }).append;
+      return typeof append === 'string' ? append : undefined;
     },
   };
 }
@@ -144,26 +165,96 @@ const assistantText = (text: string, id = 'msg-a'): SDKMessage =>
 
 let root: string;
 let cwd: string;
+let dataDir: string;
+/** The two served accounts' config directories, where their project memory lives. */
+let configDirs: { work: string; personal: string };
 let host: ReturnType<typeof createHeadlessHost>;
+
+/** The bridge's connection, pinned to the run directory these tests use. */
+const connection = (): ServerConnection => ({
+  id: 'conn-a',
+  label: 'Laptop',
+  workspace: { kind: 'directory', path: cwd },
+  token: 'token-a',
+  createdAt: 0,
+});
+
+/** A legacy-flat bank with one memory in it. No git, so nothing ever pulls. */
+async function writeBank(slug: string): Promise<string> {
+  const bank = join(root, `bank-${slug}`);
+  await mkdir(join(bank, 'memories'), { recursive: true });
+  await writeFile(
+    join(bank, 'memories', 'unraid-paths.md'),
+    '---\nname: unraid-paths\ndescription: Before writing a host path on an Unraid box\nmetadata:\n  type: reference\n---\n\nUse /mnt/user.\n',
+  );
+  return bank;
+}
+
+/** Artemis's own registry, listing one bank at one profile scope. */
+async function registerBank(
+  slug: string,
+  path: string,
+  profiles: { kind: 'all' } | { kind: 'profiles'; profileIds: readonly string[] },
+): Promise<void> {
+  await writeFile(
+    join(dataDir, REGISTRY_V2_FILE),
+    JSON.stringify({
+      version: 2,
+      banks: [{ slug, path, role: 'readwrite', enabled: true, profiles }],
+      default: slug,
+    }),
+  );
+}
+
+const profile = (id: string, label: string, configDir: string) => ({
+  id,
+  label,
+  providerId: 'claude',
+  configDir,
+  publicEnv: {},
+  createdAt: 1,
+  updatedAt: 1,
+});
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'artemis-served-settle-'));
-  const dataDir = join(root, 'data');
+  dataDir = join(root, 'data');
   cwd = join(root, 'work');
-  const configDir = join(dataDir, 'profiles', 'work');
-  await Promise.all([mkdir(configDir, { recursive: true }), mkdir(cwd, { recursive: true })]);
+  configDirs = {
+    work: join(dataDir, 'profiles', 'work'),
+    personal: join(dataDir, 'profiles', 'personal'),
+  };
+  await Promise.all([
+    mkdir(configDirs.work, { recursive: true }),
+    mkdir(configDirs.personal, { recursive: true }),
+    mkdir(cwd, { recursive: true }),
+  ]);
   await writeFile(
     join(dataDir, 'profiles.json'),
     JSON.stringify({
       version: 2,
-      profiles: [{ id: 'prof_work', label: 'Work', providerId: 'claude', configDir, publicEnv: {}, createdAt: 1, updatedAt: 1 }],
+      profiles: [
+        profile('prof_work', 'Work', configDirs.work),
+        profile('prof_personal', 'Personal', configDirs.personal),
+      ],
     }),
   );
-  host = createHeadlessHost(dataDir);
+  /*
+   * The banks are read from this machine's own files, and by default that
+   * means the *developer's* — `~/.config/cerebro/config.json` and the
+   * single-bank era's `~/Documents/cerebro`. Both are pointed at this test's
+   * scratch directory, so a machine that really carries banks neither leaks
+   * them into these assertions nor has its CLI registry written to.
+   */
+  process.env['XDG_CONFIG_HOME'] = join(root, 'xdg');
+  process.env['ARTEMIS_CEREBRO_ROOT'] = join(root, 'no-legacy-clone');
+  host = createHeadlessHost(dataDir, () => [connection()]);
 });
 
 afterEach(async () => {
   sdkMock.onQuery = undefined;
+  delete process.env['XDG_CONFIG_HOME'];
+  delete process.env['ARTEMIS_CEREBRO_ROOT'];
   await host.dispose();
   await rm(root, { recursive: true, force: true });
 });
@@ -207,5 +298,126 @@ describe('a subagent that outlives its served turn', () => {
       { timeout: 3_000 },
     );
     expect(seen.some((event) => event.type === 'text.complete' && event.text === 'The Explore agent found 14 bindings.')).toBe(true);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The banks this machine carries                                             */
+/* -------------------------------------------------------------------------- */
+
+type StartRunInput = Parameters<typeof host.runSource.startRun>[0];
+
+const started = (overrides: Partial<StartRunInput> = {}): StartRunInput => ({
+  providerId: 'claude',
+  profileId: 'prof_work',
+  cwd,
+  prompt: 'what does the team know about this repo?',
+  model: 'claude-opus-4',
+  ...overrides,
+});
+
+describe('the memory banks this machine carries', () => {
+  it('describes a bank to the account it is attached to, and to no other', async () => {
+    await registerBank('cortex', await writeBank('cortex'), {
+      kind: 'profiles',
+      profileIds: ['prof_work'],
+    });
+    const query = installQuery();
+
+    await host.runSource.startRun(started());
+    expect(query.append()).toContain('`cortex`');
+
+    // The same machine, the same bank, a different account: nothing about it
+    // reaches the run, and nothing about it is installed for that account.
+    await host.runSource.startRun(started({ profileId: 'prof_personal' }));
+    expect(query.append()).toBeUndefined();
+    expect(existsSync(join(configDirs.personal, 'projects', projectKey(cwd), 'memory', 'banks', 'cortex'))).toBe(false);
+  });
+
+  it('carries the bank on the bridge path and on a routine firing', async () => {
+    const bank = await writeBank('cortex');
+    await registerBank('cortex', bank, { kind: 'all' });
+    const query = installQuery();
+
+    // The bridge: a person at another machine, running with their own settings.
+    await host.runSource.startUserRun!({
+      providerId: 'claude',
+      profileId: 'prof_work',
+      cwd,
+      prompt: 'catch me up',
+    });
+    expect(query.append()).toContain('`cortex`');
+    // And the checkout itself, so a sandboxed tool can open what the index
+    // points at — the bank lives outside the working directory.
+    expect(query.options()['additionalDirectories']).toContain(bank);
+
+    // A firing: the most unattended run this process starts.
+    await host.routines.load();
+    const draft: RoutineDraft = {
+      name: 'Morning triage',
+      instructions: 'Read the overnight alerts and summarise.',
+      profileId: 'prof_work',
+      providerId: 'claude',
+      model: 'claude-opus-4',
+      schedule: { kind: 'daily', at: '09:00' },
+    };
+    const created = await host.routines.create({ draft, connection: connection() });
+    await host.routines.runNow(workspaceKeyFor(connection()), created.id);
+
+    expect(query.options()['systemPrompt']).toBeDefined();
+    expect(query.append()).toContain('`cortex`');
+    expect(query.options()['additionalDirectories']).toContain(bank);
+  });
+
+  it('hands a provider whose harness will not load the memory file its index inline', async () => {
+    await registerBank('cortex', await writeBank('cortex'), { kind: 'all' });
+    /*
+     * The same adapter under another id. What is under test is what the *host*
+     * makes of the provider — a Claude harness loads the project's memory file
+     * itself, and every other provider has to be told what is in it — not how
+     * a local model runs, which has its own tests.
+     */
+    const claude = host.providers.get('claude');
+    host.providers.register({ ...claude!, id: 'llamacpp' as ProviderId }, { replace: true });
+    const query = installQuery();
+
+    await host.runSource.startRun(started({ providerId: 'llamacpp' }));
+    const append = query.append();
+    expect(append).toContain('What `cortex` holds for this project');
+    expect(append).toContain('Before writing a host path on an Unraid box');
+
+    // The Claude account on the same machine is told where the index is, not
+    // what is in it.
+    await host.runSource.startRun(started());
+    expect(query.append()).not.toContain('What `cortex` holds for this project');
+  });
+
+  it('installs the bank into the run\'s project before the run starts', async () => {
+    await registerBank('cortex', await writeBank('cortex'), { kind: 'all' });
+    const memory = join(configDirs.work, 'projects', projectKey(cwd), 'memory');
+
+    // Read at the instant the SDK is called, which is inside the start: a
+    // first run in a new project must not begin without the team's memory.
+    let installedWhenQueried = false;
+    installQuery(() => {
+      installedWhenQueried = existsSync(join(memory, 'banks', 'cortex', 'unraid-paths.md'));
+    });
+    await host.runSource.startRun(started());
+
+    expect(installedWhenQueried).toBe(true);
+    const index = await readFile(join(memory, 'MEMORY.md'), 'utf8');
+    expect(index).toContain('<!-- cerebro:cortex:begin -->');
+    expect(index).toContain('unraid-paths.md');
+  });
+
+  it('starts the run it always started on a machine with no banks', async () => {
+    const query = installQuery();
+    await host.runSource.startRun(started({ systemPrompt: 'Answer in one line.' }));
+    // The client's own standing instructions, and nothing of this machine's.
+    expect(query.append()).toBe('Answer in one line.');
+    // The adapter attaches a scratch directory of its own for attachments; no
+    // bank is among them, because there is no bank.
+    const directories = (query.options()['additionalDirectories'] ?? []) as readonly string[];
+    expect(directories.some((directory) => directory.startsWith(join(root, 'bank-')))).toBe(false);
   });
 });

@@ -1,14 +1,17 @@
 /**
- * The pure half of `memoryBanks.ts` — parsing the CLI's `--json` output and
- * its registry file into the protocol's shapes. Fixtures mirror real output
- * from `bin/cerebro` 0.6.0 (the first multi-bank version), including the
- * cases the numbers hide: profiles that symlink one shared projects store,
- * project entries stamped with a `bank` versus legacy unstamped ones, and the
- * pre-multi-bank `{"bank": path}` registry.
+ * The pure half of `memoryBanks.ts`: the decisions, without the disk or the
+ * spawns around them.
+ *
+ * What is here changed shape when core learned to read banks itself. There is
+ * no CLI output to parse any more — a bank's condition is built from what
+ * `readBankAt` found in the directory, which is why the fixtures below are
+ * *directories*, written into a temp dir and read the way the app reads them.
+ * The CLI's registry parser stays, because the CLI's file is still mirrored on
+ * every write and a machine may still have one written by hand.
  *
  * The same convention covers the spawn's pure halves, added when the module
  * learned to run on Windows and to reach a private remote: which interpreter
- * to drive the CLI with, what every spawn is told, and what one
+ * to drive the legacy CLI with, what every spawn is told, and what one
  * `git ls-remote` means. Those are decisions rather than I/O, and the fixtures
  * for the last one are stderr the hosts in reach actually produce — the whole
  * value of the feature is that four indistinguishable-looking failures are
@@ -17,22 +20,25 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { readBankAt, type BankRecord } from '@rx-artemis/core';
+
 import {
   acceptsAsPython3,
+  bankInfoFrom,
   baseCliEnv,
   categorizeLsRemote,
   configureMemoryBanks,
+  hasBankBlock,
+  hasSessionStartSyncHook,
   isMasterEnabled,
   needsPythonInterpreter,
-  parseBanksStatus,
-  parseDoctor,
   parseGitOrigin,
-  parseMemories,
   parseRegistry,
+  pullDue,
   PYTHON_CANDIDATES,
   selectPython,
   syncDue,
@@ -41,127 +47,162 @@ import {
   type PythonProbe,
 } from './memoryBanks';
 
-const STATUS_FIXTURE = JSON.stringify({
-  repo: '/Users/demo/Documents/cerebro',
-  source: 'cerebro@52a0a32',
-  remote: 'https://github.com/Rx-Ventures/cerebro.git',
-  artemis_root: '/Users/demo/Library/Application Support/Artemis',
-  bank: { memories: 3, errors: 0, warnings: 0 },
-  banks: [
-    {
+/* -------------------------------------------------------------------------- */
+/* A bank's condition, from the bank                                          */
+/* -------------------------------------------------------------------------- */
+
+const RECORD: BankRecord = {
+  slug: 'cerebro',
+  path: '',
+  role: 'readwrite',
+  enabled: true,
+  profiles: { kind: 'all' },
+};
+
+/**
+ * A legacy-flat bank on disk: one memory that validates and one file that
+ * cannot be read as one. Both halves matter — the pane counts the second and
+ * shows the reason, which is how the person who can fix it finds out.
+ */
+function writeLegacyFlatBank(): string {
+  const root = mkdtempSync(join(tmpdir(), 'artemis-bank-'));
+  mkdirSync(join(root, 'memories'), { recursive: true });
+  writeFileSync(
+    join(root, 'memories', 'deploy-approval-flow.md'),
+    [
+      '---',
+      'name: deploy-approval-flow',
+      'description: When deploying to production',
+      'metadata:',
+      '  type: reference',
+      '  added: 2026-08-14',
+      '  author: demo@example.com',
+      '---',
+      '',
+      'Deploys need approval in #deploys first.',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  writeFileSync(join(root, 'memories', 'broken.md'), 'no frontmatter at all\n', 'utf8');
+  return root;
+}
+
+describe('bankInfoFrom', () => {
+  const facts = { isDefault: true, remote: null, source: 'artemis@1a2b3c4', projects: 2 };
+
+  it('describes a legacy bank read off disk, problems and all', () => {
+    const path = writeLegacyFlatBank();
+    const record = { ...RECORD, path };
+    const info = bankInfoFrom(record, readBankAt(path, { slug: record.slug }), facts);
+
+    expect(info).toMatchObject({
       slug: 'cerebro',
-      path: '/Users/demo/Documents/cerebro',
-      role: 'readwrite',
-      enabled: true,
-      default: true,
+      // A legacy bank says nothing about itself, so the slug is its name.
+      name: 'cerebro',
+      description: null,
+      format: 'legacy-flat',
       exists: true,
-      source: 'cerebro@52a0a32',
-      remote: 'https://github.com/Rx-Ventures/cerebro.git',
-      bank: { memories: 3, errors: 0, warnings: 0 },
-    },
-    {
-      slug: 'client-docs',
-      path: '/Users/demo/Documents/client-docs',
-      role: 'readonly',
-      enabled: false,
-      default: false,
-      exists: true,
-      source: 'cerebro@1a2b3c4',
-      remote: null,
-      bank: { memories: 5, own: 2, mirrored: 3, errors: 1, warnings: 0 },
-    },
-  ],
-  profiles: [
-    {
-      name: 'storrence-dev',
-      label: 'storrence.dev',
-      enabled: true,
-      hook: true,
-      banks: { cerebro: true, 'client-docs': false },
-      projects: [
-        // Legacy entries carry no `bank` stamp and belong to the legacy slug…
-        { key: '-Users-demo-Documents-app', memories: 3, source: 'cerebro@52a0a32' },
-        { key: '-Users-demo-Documents-api', memories: 3, source: 'cerebro@52a0a32' },
-        // …stamped entries belong to theirs.
-        { key: '-Users-demo-Documents-app', bank: 'client-docs', memories: 5, source: 'cerebro@1a2b3c4' },
-      ],
-      shared_with: null,
-    },
-    {
-      name: 'work',
-      label: 'Work – Team',
-      enabled: true,
-      hook: false,
-      banks: { cerebro: true, 'client-docs': false },
-      projects: [],
-      shared_with: 'storrence-dev',
-    },
-  ],
+      memories: 2,
+      validationErrors: 1,
+      // The field the old CLI filled from its mirror trees; core has no such
+      // notion, and the protocol's number is honestly zero.
+      mirrored: 0,
+      projects: 2,
+      isDefault: true,
+      profiles: { kind: 'all' },
+    });
+    // One file, several reasons — each its own line, each naming the file, so
+    // the pane can show them without knowing which bank format produced them.
+    expect(info.problems.length).toBeGreaterThan(0);
+    expect(info.problems.every((problem) => problem.startsWith('memories/broken.md: '))).toBe(true);
+    expect(info.problems.join(' ')).toMatch(/no frontmatter/);
+  });
+
+  it('reads a manifest bank`s own name and description', () => {
+    const path = writeLegacyFlatBank();
+    writeFileSync(
+      join(path, 'BANK.md'),
+      ['---', 'name: cortex', 'description: The homelab and its machines.', '---', '', 'Body.', ''].join('\n'),
+      'utf8',
+    );
+    const record = { ...RECORD, path, slug: 'cortex' };
+    const info = bankInfoFrom(record, readBankAt(path, { slug: record.slug }), facts);
+    expect(info.format).toBe('manifest');
+    expect(info.name).toBe('cortex');
+    expect(info.description).toBe('The homelab and its machines.');
+  });
+
+  it('describes a path that is no longer a bank without losing the record', () => {
+    // The registry still names it, so the pane can offer to forget it. What it
+    // must not do is claim the bank is there.
+    const record = { ...RECORD, path: join(tmpdir(), 'artemis-not-a-bank') };
+    const info = bankInfoFrom(record, null, { ...facts, source: null, projects: 0 });
+    expect(info).toMatchObject({
+      exists: false,
+      format: null,
+      memories: 0,
+      validationErrors: 0,
+      problems: [],
+      path: record.path,
+      slug: 'cerebro',
+      name: 'cerebro',
+    });
+  });
+
+  it('caps the problems it reports, because the count is already exact', () => {
+    const path = mkdtempSync(join(tmpdir(), 'artemis-bank-'));
+    mkdirSync(join(path, 'memories'), { recursive: true });
+    for (let i = 0; i < 20; i += 1) {
+      writeFileSync(join(path, 'memories', `broken-${String(i)}.md`), 'nothing\n', 'utf8');
+    }
+    const info = bankInfoFrom({ ...RECORD, path }, readBankAt(path, { slug: 'cerebro' }), facts);
+    expect(info.validationErrors).toBe(20);
+    expect(info.problems).toHaveLength(12);
+  });
 });
 
-describe('parseBanksStatus', () => {
-  it('rebuilds the protocol shape from real status output', () => {
-    const status = parseBanksStatus(STATUS_FIXTURE, true, true);
-    expect(status.cliAvailable).toBe(true);
-    expect(status.masterEnabled).toBe(true);
-    expect(status.banks).toHaveLength(2);
+/* -------------------------------------------------------------------------- */
+/* What a profile carries, for stock Claude Code's sake                       */
+/* -------------------------------------------------------------------------- */
 
-    const [cerebro, docs] = status.banks;
-    expect(cerebro).toEqual({
-      slug: 'cerebro',
-      path: '/Users/demo/Documents/cerebro',
-      remote: 'https://github.com/Rx-Ventures/cerebro.git',
-      role: 'readwrite',
-      enabled: true,
-      isDefault: true,
-      exists: true,
-      source: 'cerebro@52a0a32',
-      memories: 3,
-      // A health block that predates mirror trees reads as zero mirrored —
-      // the classic bank's truthful answer, not a parse failure.
-      mirrored: 0,
-      validationErrors: 0,
-      projects: 2,
-    });
-    expect(docs).toMatchObject({
-      slug: 'client-docs',
-      role: 'readonly',
-      enabled: false,
-      isDefault: false,
-      remote: null,
-      memories: 5,
-      mirrored: 3,
-      validationErrors: 1,
-      projects: 1,
+describe('hasSessionStartSyncHook', () => {
+  const settings = (command: string): string =>
+    JSON.stringify({
+      hooks: {
+        SessionStart: [{ matcher: 'startup', hooks: [{ type: 'command', command }] }],
+      },
     });
 
-    expect(status.profiles).toHaveLength(2);
-    expect(status.profiles[0]).toEqual({
-      name: 'storrence-dev',
-      label: 'storrence.dev',
-      hook: true,
-      banks: { cerebro: true, 'client-docs': false },
-    });
+  it('recognises the hook however the CLI happened to be spelled', () => {
+    // A shim on PATH, a bank's own copy, and the Windows spawn — all one hook.
+    expect(hasSessionStartSyncHook(settings('cerebro sync --quiet'))).toBe(true);
+    expect(hasSessionStartSyncHook(settings('/home/me/Documents/cortex/bin/cerebro sync --quiet'))).toBe(true);
+    expect(hasSessionStartSyncHook(settings('py -3 C:\\banks\\cortex\\bin\\cerebro sync'))).toBe(true);
   });
 
-  it('masterEnabled is the caller`s fact, not the CLI`s', () => {
-    expect(parseBanksStatus(STATUS_FIXTURE, false, true).masterEnabled).toBe(false);
+  it('is false for another SessionStart hook, and for a cerebro that does not sync', () => {
+    expect(hasSessionStartSyncHook(settings('echo hello'))).toBe(false);
+    expect(hasSessionStartSyncHook(settings('cerebro doctor'))).toBe(false);
   });
 
-  it('drops a bank whose slug is not in the banks` own grammar', () => {
-    const status = parseBanksStatus(
-      JSON.stringify({
-        banks: [{ slug: '../escape', path: '/x', role: 'readwrite', enabled: true }],
-        profiles: [],
-      }),
-      true,
-      true,
-    );
-    expect(status.banks).toHaveLength(0);
+  it('is false for a settings file with no hooks, and for one that will not parse', () => {
+    expect(hasSessionStartSyncHook('{}')).toBe(false);
+    expect(hasSessionStartSyncHook(JSON.stringify({ hooks: { PreToolUse: [] } }))).toBe(false);
+    expect(hasSessionStartSyncHook('')).toBe(false);
+    expect(hasSessionStartSyncHook('{ "hooks": ')).toBe(false);
+  });
+});
+
+describe('hasBankBlock', () => {
+  it('finds the legacy slug`s unprefixed marker and a named bank`s', () => {
+    expect(hasBankBlock('# Notes\n\n<!-- cerebro:begin -->\n- one\n<!-- cerebro:end -->\n', 'cerebro')).toBe(true);
+    expect(hasBankBlock('<!-- cerebro:brandsolidate:begin -->\n', 'brandsolidate')).toBe(true);
   });
 
-  it('refuses output that is not JSON, in its own words', () => {
-    expect(() => parseBanksStatus('warning: something\n{', true, true)).toThrow(/not JSON/);
+  it('does not mistake one bank`s block for another`s', () => {
+    expect(hasBankBlock('<!-- cerebro:brandsolidate:begin -->\n', 'cortex')).toBe(false);
+    expect(hasBankBlock('# Nothing here\n', 'cerebro')).toBe(false);
   });
 });
 
@@ -204,94 +245,6 @@ describe('parseRegistry', () => {
       JSON.stringify({ banks: [{ slug: 'ok', path: '/a' }, { slug: 'NO CAPS', path: '/b' }, { path: '/c' }, 42] }),
     );
     expect(banks.map((bank) => bank.slug)).toEqual(['ok']);
-  });
-});
-
-const LIST_FIXTURE = JSON.stringify([
-  {
-    name: 'deploy-approval-flow',
-    description: 'When deploying to production',
-    metadata: { type: 'project', added: '2026-08-14', author: 'demo@example.com' },
-    body: 'Deploys need approval in #deploys first.',
-    file: 'memories/deploy-approval-flow.md',
-    org: null,
-    project: null,
-    tree: 'memories',
-    readonly: false,
-    errors: [],
-    warnings: [],
-  },
-  // A mirror-tree memory: grouped under org/project and read-only.
-  {
-    name: 'unraid-server',
-    description: 'The Unraid box and how to reach it',
-    metadata: { type: 'reference' },
-    body: 'Tailscale IP, GraphQL API, key in the vault.',
-    file: 'memory/claude/unraid-server.md',
-    org: 'personal',
-    project: 'claude',
-    tree: 'memory',
-    readonly: true,
-    errors: [],
-    warnings: [],
-  },
-  // A file the bank could not parse: name-less, carried for the error count.
-  { file: 'memories/broken.md', errors: ['no frontmatter'] },
-]);
-
-describe('parseMemories', () => {
-  it('maps parseable entries and drops the name-less', () => {
-    const memories = parseMemories(LIST_FIXTURE);
-    expect(memories).toHaveLength(2);
-    expect(memories[0]).toEqual({
-      name: 'deploy-approval-flow',
-      type: 'project',
-      description: 'When deploying to production',
-      body: 'Deploys need approval in #deploys first.',
-      added: '2026-08-14',
-      author: 'demo@example.com',
-      org: null,
-      project: null,
-      readonly: false,
-      file: 'memories/deploy-approval-flow.md',
-    });
-    expect(memories[1]).toMatchObject({
-      name: 'unraid-server',
-      org: 'personal',
-      project: 'claude',
-      readonly: true,
-      file: 'memory/claude/unraid-server.md',
-      added: null,
-      author: null,
-    });
-  });
-
-  it('refuses a non-array, in its own words', () => {
-    expect(() => parseMemories('{}')).toThrow(/not an array/);
-  });
-});
-
-describe('parseDoctor', () => {
-  it('rebuilds checks and drops unknown states', () => {
-    const preflight = parseDoctor(
-      JSON.stringify({
-        ready: false,
-        checks: [
-          { id: 'git', label: 'git', state: 'ok', detail: 'git version 2.55.0', remedy: null },
-          { id: 'weird', label: 'Future', state: 'exploded', detail: 'x', remedy: null },
-          {
-            id: 'git-identity',
-            label: 'git identity',
-            state: 'fail',
-            detail: 'unset',
-            remedy: 'git config --global …',
-          },
-        ],
-      }),
-    );
-    expect(preflight.ready).toBe(false);
-    expect(preflight.checks.map((check) => check.id)).toEqual(['git', 'git-identity']);
-    expect(preflight.checks[1]?.remedy).toBe('git config --global …');
   });
 });
 
@@ -607,5 +560,25 @@ describe('syncDue: the per-directory throttle', () => {
      */
     expect(syncDue({ lastSyncAt: 1000, lastSyncCwd: '/w/app' }, '/w/other', 1000 + 5)).toBe(true);
     expect(syncDue({ lastSyncAt: 1000 }, '/w/app', 1000 + 5)).toBe(true);
+  });
+});
+
+describe('pullDue: the per-bank network throttle', () => {
+  const MINUTE = 60_000;
+
+  it('lets a bank that has never pulled through', () => {
+    expect(pullDue(undefined, 0)).toBe(true);
+  });
+
+  it('holds a bank that pulled within the last quarter of an hour', () => {
+    expect(pullDue(1000, 1000 + 5 * MINUTE)).toBe(false);
+    expect(pullDue(1000, 1000 + 14 * MINUTE)).toBe(false);
+  });
+
+  it('lets it through again at fifteen minutes', () => {
+    // The install half still runs on every pass; this throttle is only about
+    // asking the forge, which a bank people commit to a few times a day does
+    // not benefit from being asked more often than this.
+    expect(pullDue(1000, 1000 + 15 * MINUTE)).toBe(true);
   });
 });

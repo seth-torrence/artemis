@@ -14,7 +14,13 @@ import { describe, expect, it } from 'vitest';
 
 import type { RunInput } from '@rx-artemis/protocol';
 
-import { builtInsFor, mergeAdditionalDirectories, rememberModels, withSystemPromptAppended } from './engine.js';
+import {
+  builtInsFor,
+  inlineBankIndex,
+  mergeAdditionalDirectories,
+  rememberModels,
+  withSystemPromptAppended,
+} from './engine.js';
 
 const RUN: RunInput = {
   providerId: 'claude',
@@ -188,5 +194,24 @@ describe('builtInsFor', () => {
     // unaffected by this set.
     expect(builtInsFor('artemis', every).has('builtin:cerebro')).toBe(false);
     expect(builtInsFor('artemis', new Set())).toEqual(new Set());
+  });
+});
+
+/**
+ * Whether the bank's index rides in the prompt, which is a claim about other
+ * people's harnesses: the Claude SDK loads the project's `MEMORY.md` where the
+ * same index already sits, and nothing else does.
+ */
+describe('inlineBankIndex', () => {
+  it('leaves the index to the file on a Claude profile', () => {
+    // Inlining there would put every line in front of the model twice.
+    expect(inlineBankIndex('claude')).toBe(false);
+  });
+
+  it('carries the index for every harness that loads no memory file', () => {
+    // Without it these know a bank exists and nothing about what is in it.
+    expect(inlineBankIndex('llamacpp')).toBe(true);
+    expect(inlineBankIndex('codex')).toBe(true);
+    expect(inlineBankIndex('artemis')).toBe(true);
   });
 });

@@ -812,6 +812,7 @@ export function createRemoteBridge(
       sync: async () => absent(LOCAL_SETTINGS_REASON),
       retire: async () => absent(LOCAL_SETTINGS_REASON),
       setEnabled: async () => absent(LOCAL_SETTINGS_REASON),
+      setProfiles: async () => absent(LOCAL_SETTINGS_REASON),
       forget: async () => absent(LOCAL_SETTINGS_REASON),
       setMasterEnabled: async () => absent(LOCAL_SETTINGS_REASON),
     },

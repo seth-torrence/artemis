@@ -2,12 +2,16 @@
  * The standing prompts — the rule half of the Instructions pane.
  * ============================================================================
  *
- * No longer a pane of its own: `InstructionsSection` composes these groups
- * above the memory banks, on the argument the old nav made from a distance —
- * a prompt library is the general case of "what the agent is told before the
- * conversation starts", and the banks are its best-known instance. The file
- * keeps its name because the section id `agents` is a frozen address, and the
- * file answering for an address is easier to find when it is named after it.
+ * No longer a pane of its own: `InstructionsSection` composes these groups,
+ * and the file keeps its name because the section id `agents` is a frozen
+ * address, and the file answering for an address is easier to find when it is
+ * named after it.
+ *
+ * The memory banks were composed under these groups for a while, on the
+ * argument that a prompt library is the general case of "what the agent is
+ * told before the conversation starts" and a bank is its best-known instance.
+ * They have their own pane again — a bank outgrew being a paragraph — and what
+ * is left of the adjacency here is one built-in row and the sentence under it.
  *
  * A prompt library and the rules for which accounts each prompt reaches. What
  * the user writes here is appended to the provider's own system prompt on every
@@ -114,6 +118,25 @@ import { cn } from '@/lib/utils';
 function isEditableBuiltIn(prompt: AgentPrompt): boolean {
   return prompt.builtIn === 'builtin:cerebro';
 }
+
+/**
+ * The one built-in that does not answer to this pane's scope.
+ *
+ * The memory-banks prompt is rendered per run out of the banks the run's
+ * profile carries, so "which profiles does it reach" is already answered —
+ * under Memory banks, one bank at a time, by attaching each to every profile
+ * or to a chosen set. A second scope here would be a second answer to the same
+ * question, and the two would disagree the first time someone used both: a
+ * profile ticked here and carrying no bank gets a prompt about nothing, and a
+ * profile carrying a bank but unticked here gets the bank's directory with no
+ * word about what it is for.
+ */
+function scopedByBanks(prompt: AgentPrompt): boolean {
+  return prompt.builtIn === 'builtin:cerebro';
+}
+
+/** What the banks prompt says instead of a scope, in the row and in the editor. */
+const BANKS_SCOPE_LINE = 'Sent with every bank the run’s profile carries.';
 
 /** What a profile can be told, and why not when it cannot. */
 interface ScopeTarget {
@@ -366,8 +389,10 @@ function PromptRow({
         <span className="text-2xs leading-snug text-ink-faint">
           {prompt.enabled
             ? unavailable
-              ? `On, but not sent — ${builtIn?.requires ?? 'its precondition'} is not true on this machine.`
-              : `Sent to ${describeScope(prompt.scope, targets)}.`
+              ? `On, but not sent — it needs ${builtIn?.requires ?? 'a precondition this machine does not meet'}.`
+              : scopedByBanks(prompt)
+                ? BANKS_SCOPE_LINE
+                : `Sent to ${describeScope(prompt.scope, targets)}.`
             : 'Off — kept, never sent.'}
         </span>
       </button>
@@ -488,7 +513,8 @@ function PromptEditor({
       {unavailable ? (
         <p className="flex items-center gap-1.5 px-3 py-2.5 text-2xs leading-relaxed text-ink-faint">
           <StatusDot tone="amber" />
-          Not being sent right now — {builtIn?.requires} is not true on this machine.
+          Not being sent right now — it needs{' '}
+          {builtIn?.requires ?? 'a precondition this machine does not meet'}.
         </p>
       ) : null}
 
@@ -531,7 +557,19 @@ function PromptEditor({
         />
       </div>
 
-      <ScopePicker prompt={prompt} targets={targets} onChange={(scope) => patch({ scope })} />
+      {/*
+        One sentence where the picker would be, rather than a picker that is
+        disabled or simply absent. Absent would leave the one prompt in the
+        library with nothing under it saying who gets it, and disabled would
+        be this pane claiming to own an answer it does not hold.
+      */}
+      {scopedByBanks(prompt) ? (
+        <p className="px-3 py-2.5 text-2xs leading-relaxed text-ink-faint">
+          {BANKS_SCOPE_LINE} Attach banks to profiles under Memory banks.
+        </p>
+      ) : (
+        <ScopePicker prompt={prompt} targets={targets} onChange={(scope) => patch({ scope })} />
+      )}
     </SettingsGroup>
   );
 }

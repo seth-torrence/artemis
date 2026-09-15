@@ -414,12 +414,24 @@ function advanceMockSignIn(current: ServerSignInStatus | null): ServerSignInStat
 /**
  * The banks "on this machine": agents write to the real ones; here, retire
  * deletes. Two banks so the multi-bank rendering — read-only badge, default
- * marker, per-bank switches — is the state dev meets by default.
+ * marker, per-bank switches — is the state dev meets by default, and one of
+ * each format, attached two different ways, so the format badge and the
+ * profile picker both have something to draw without anyone arranging it.
  */
 let mockMasterEnabled = true;
 let mockBanks: MemoryBankInfo[] = [
   {
     slug: 'team-memory',
+    name: 'Team memory',
+    description:
+      'What the team has learned about its own systems. Use for anything about the harness, its deployments or its conventions.',
+    format: 'manifest',
+    profiles: { kind: 'all' },
+    // One refused entry, so the problems disclosure and the memory card's
+    // "not installed" rendering are both reachable in dev.
+    problems: [
+      'memories/demo-org/harness/half-written.md: metadata.type must be one of decision, feedback, reference, workflow',
+    ],
     path: '/Users/demo/Documents/team-memory',
     remote: 'https://github.com/demo-team/team-memory.git',
     role: 'readwrite',
@@ -427,9 +439,9 @@ let mockBanks: MemoryBankInfo[] = [
     isDefault: true,
     exists: true,
     source: 'cerebro@52a0a32',
-    memories: 3,
+    memories: 4,
     mirrored: 0,
-    validationErrors: 0,
+    validationErrors: 1,
     projects: 27,
     // Held as a reference rather than as a token, so the pane's "from a key
     // manager" rendering is what dev meets by default — including the degraded
@@ -438,7 +450,14 @@ let mockBanks: MemoryBankInfo[] = [
     credential: { kind: 'ref' },
   },
   {
+    // No manifest and no name of its own, so the card prints the slug once —
+    // the case a legacy cerebro bank is in until someone describes it.
     slug: 'client-docs',
+    name: 'client-docs',
+    description: null,
+    format: 'legacy-projects',
+    profiles: { kind: 'profiles', profileIds: ['demo-personal'] },
+    problems: [],
     path: '/Users/demo/Documents/client-docs',
     remote: null,
     role: 'readonly',
@@ -637,6 +656,7 @@ function rememberMockVerify(id: string, result: SecretVerifyResult): void {
 let mockBankMemories: MemoryBankMemory[] = [
   {
     name: 'team-memory-bank',
+    title: 'Team memory bank',
     type: 'reference',
     description: "What the team memory bank is, and how agents keep it current",
     body: "The team memory bank is shared by every developer on the Artemis harness — and agents, not developers, maintain it.",
@@ -644,11 +664,14 @@ let mockBankMemories: MemoryBankMemory[] = [
     author: 'demo@example.com',
     org: null,
     project: null,
+    scope: {},
+    problems: [],
     readonly: false,
     file: 'memories/team-memory-bank.md',
   },
   {
     name: 'writing-team-memories',
+    title: 'Writing team memories',
     type: 'feedback',
     description: 'House style for team memories: atomic, durable, absolute dates, team-relevant, no secrets',
     body: 'A team memory is one fact per file, written so a teammate (or their agent) who lacks your context can act on it.',
@@ -656,13 +679,34 @@ let mockBankMemories: MemoryBankMemory[] = [
     author: 'demo@example.com',
     org: 'demo-org',
     project: 'harness',
+    scope: { org: 'demo-org', project: 'harness' },
+    problems: [],
     readonly: false,
     file: 'memories/demo-org/harness/writing-team-memories.md',
+  },
+  // The refused entry the bank's `problems` line counts. Browsable, so the
+  // person who can fix it can see what is wrong — which is the whole reason
+  // an entry with problems is listed at all.
+  {
+    name: 'half-written',
+    title: 'Half written',
+    type: 'note',
+    description: 'Something an agent started and did not finish',
+    body: 'No metadata.type, so the reader will not install it.',
+    added: null,
+    author: null,
+    org: 'demo-org',
+    project: 'harness',
+    scope: { org: 'demo-org', project: 'harness' },
+    problems: ['metadata.type must be one of decision, feedback, reference, workflow'],
+    readonly: false,
+    file: 'memories/demo-org/harness/half-written.md',
   },
   // A mirror-tree memory, so dev meets the grouped, read-only rendering —
   // badge on, retire hidden — without arranging a real mirror.
   {
     name: 'artemis-agent-harness',
+    title: 'Artemis agent harness',
     type: 'reference',
     description: 'Artemis is our in-house Claude agent harness; where its profiles, projects, and memory live on disk',
     body: 'Artemis is the team’s in-house agent harness, an Electron app wrapping the Claude Agent SDK.',
@@ -670,6 +714,8 @@ let mockBankMemories: MemoryBankMemory[] = [
     author: 'demo@example.com',
     org: 'demo-org',
     project: 'sessions',
+    scope: { org: 'demo-org', project: 'sessions' },
+    problems: [],
     readonly: true,
     file: 'memory/sessions/artemis-agent-harness.md',
   },
@@ -1830,6 +1876,14 @@ export function createMockBridge(): ArtemisBridge {
           ...mockBanks,
           {
             slug: request.slug,
+            name: request.slug,
+            description: null,
+            // A created bank starts from the BANK.md Artemis writes it; a
+            // joined or adopted one is whatever was already there, and the
+            // mock has no directory to look in, so it guesses the same.
+            format: 'manifest',
+            profiles: { kind: 'all' },
+            problems: [],
             path: request.path ?? `/Users/demo/Documents/${request.slug}`,
             remote: request.remote ?? null,
             role: request.role,
@@ -1861,6 +1915,17 @@ export function createMockBridge(): ArtemisBridge {
           message: request.enabled
             ? `'${request.slug}' is on. Installed into project memory.`
             : `'${request.slug}' is off — its profile block is out, and syncs skip it.`,
+        });
+      },
+      setProfiles: async (request) => {
+        mockBanks = mockBanks.map((bank) =>
+          bank.slug === request.slug ? { ...bank, profiles: request.profiles } : bank,
+        );
+        return ok({
+          message:
+            request.profiles.kind === 'all'
+              ? `'${request.slug}' is attached to every profile, including accounts added later.`
+              : `'${request.slug}' is attached to ${request.profiles.profileIds.length} profile(s). Installed into their projects; removed from the rest.`,
         });
       },
       forget: async (request) => {

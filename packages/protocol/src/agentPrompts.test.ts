@@ -478,7 +478,7 @@ describe('renderMemoryBanksPrompt', () => {
     expect(text).toContain('--bank notes draft <slug> --type <user|feedback|project|reference> \\');
     expect(text).not.toContain('--org <org>');
     // The nested bank still says how it is laid out, on its own line.
-    expect(text).toMatch(/`upstream` \(read-only.*filed by project/);
+    expect(text).toMatch(/`upstream` read-only.*filed by project/);
   });
 
   it('carries a bank\'s own instructions, after Artemis\'s text and before the reference line', () => {
@@ -517,6 +517,27 @@ describe('scopeCovers', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('parseAgentPromptsDocument', () => {
+  it('reads a stored scope on the banks built-in as every profile', () => {
+    // An older build offered a scope picker for it; which banks a run meets
+    // is now decided per bank, so a narrowed scope left in the file would
+    // silently narrow delivery from a control the pane no longer shows.
+    const document = parseAgentPromptsDocument({
+      version: 1,
+      prompts: [
+        {
+          id: 'builtin:cerebro',
+          builtIn: 'builtin:cerebro',
+          markdown: '',
+          enabled: true,
+          scope: { kind: 'profiles', profileIds: ['work'] },
+        },
+        { id: 'p1', name: 'Mine', markdown: 'x', enabled: true, scope: { kind: 'profiles', profileIds: ['work'] } },
+      ],
+    });
+    expect(document.prompts.find((prompt) => prompt.builtIn === 'builtin:cerebro')?.scope).toEqual({ kind: 'all' });
+    expect(document.prompts.find((prompt) => prompt.id === 'p1')?.scope).toEqual({ kind: 'profiles', profileIds: ['work'] });
+  });
+
   it('answers with the defaults for anything that is not a document', () => {
     for (const junk of [null, undefined, 42, 'prompts', [], true]) {
       expect(parseAgentPromptsDocument(junk)).toEqual(defaultAgentPromptsDocument());

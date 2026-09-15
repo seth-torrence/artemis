@@ -314,8 +314,9 @@ export interface MemoryBankPromptInfo {
   /** The org a draft is filed under when none is named, from `cerebro.json`. */
   readonly defaultOrg?: string;
   /**
-   * What the bank's maintainers wrote for agents — the markdown file the bank's
-   * `cerebro.json` names as `instructions`, already bounded by the reader.
+   * What the bank's maintainers wrote for agents — the body of its `BANK.md`,
+   * or the markdown file its `cerebro.json` names as `instructions`, already
+   * bounded by the reader.
    *
    * Carried into the prompt after Artemis's own text, so a bank can say how it
    * wants to be read and written in its own words, without Artemis knowing
@@ -324,6 +325,39 @@ export interface MemoryBankPromptInfo {
    * for this machine's agents.
    */
   readonly instructions?: string;
+  /** What the bank calls itself, from its manifest. The slug when it says nothing. */
+  readonly name?: string;
+  /** One line on what the bank holds and when to use it, from its manifest. */
+  readonly description?: string;
+  /**
+   * How the bank is kept. `manifest` is a bank with a `BANK.md`; the two
+   * legacy formats are the `cerebro` CLI's, read unchanged. Absent means the
+   * caller predates formats, and the prompt falls back to `layout`.
+   */
+  readonly format?: 'legacy-flat' | 'legacy-projects' | 'manifest';
+  /** Where the bank's copies live in a project's memory: `banks/<slug>` or `cerebro`. */
+  readonly home?: string;
+  /**
+   * How entries are filed: the folder labels in order (`org`, `project`; or
+   * `brand`, `system`) and the template a new entry is written at.
+   */
+  readonly filing?: {
+    readonly levels: readonly string[];
+    readonly place?: string;
+  };
+  /**
+   * The index of this bank's entries that apply to the run's project, as the
+   * bullets the project's memory file carries, already budgeted. Rendered
+   * into the prompt only for a provider whose harness does not load that file
+   * itself.
+   */
+  readonly index?: {
+    readonly text: string;
+    readonly indexed: number;
+    readonly total: number;
+  };
+  /** The memory tools (`memory_search`, `memory_draft`, …) reach this run. */
+  readonly tools?: boolean;
 }
 
 /**
@@ -344,11 +378,37 @@ export const TEAM_BANK_NAME_PLACEHOLDER = '<team memory bank name>';
  */
 const LEGACY_BANK_HOME = 'cerebro';
 
-export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]): string {
+export interface RenderMemoryBanksOptions {
+  /**
+   * Carry each bank's budgeted index in the prompt itself.
+   *
+   * For a provider whose harness does not load the project's memory file —
+   * a local model, Codex — the index in `MEMORY.md` is a file the agent would
+   * have to go and read, from a directory outside its working tree. Inlining
+   * it is what makes the bank reachable on those providers at all. A Claude
+   * profile loads the file itself, and inlining would say everything twice.
+   */
+  readonly inlineIndex?: boolean;
+}
+
+/** Does the prompt teach this bank's CLI? A legacy bank, or one the caller could not describe. */
+function cliTaught(bank: MemoryBankPromptInfo): boolean {
+  return bank.format === undefined || bank.format !== 'manifest';
+}
+
+/** `org, then project` — the folder labels a bank files by, in words. */
+function levelsInWords(levels: readonly string[]): string {
+  return levels.join(', then ');
+}
+
+export function renderMemoryBanksPrompt(
+  banks: readonly MemoryBankPromptInfo[],
+  options: RenderMemoryBanksOptions = {},
+): string {
   /*
    * With no bank set up yet the prompt still has to read as itself: this is the
-   * text the Agents pane shows, and the text an override starts from, so a
-   * stripped-down version would hand the user something they then had to
+   * text the Instructions pane shows, and the text an override starts from, so
+   * a stripped-down version would hand the user something they then had to
    * reconstruct. One placeholder bank stands in instead, and every sentence
    * that would speak a name speaks {@link TEAM_BANK_NAME_PLACEHOLDER}.
    *
@@ -365,19 +425,32 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
   const plural = described.length > 1;
   const writable = described.filter((bank) => !bank.readonly);
   const fallback = described.find((bank) => bank.isDefault) ?? described[0];
+  // The memory tools are a property of the run, not of a bank: when they
+  // reach it, every bank is written through them, and no CLI is taught.
+  const tools = described.some((bank) => bank.tools === true);
+  const teachCli = !tools && described.some(cliTaught);
 
   const lines = described.map((bank) => {
     const marks = [
       bank.readonly ? 'read-only: consult it, never write to it' : 'read-write',
-      ...(bank.isDefault && plural ? ['the default — bare `cerebro` commands address it'] : []),
+      ...(bank.isDefault && plural && teachCli ? ['the default — bare `cerebro` commands address it'] : []),
       // Where a memory lands is a fact about the bank, read off the bank. Said
       // per bank because two banks on one machine can be laid out differently.
-      ...(bank.layout === 'projects'
-        ? ['filed by project: every memory sits under `projects/<org>/<project>/memories/`']
-        : []),
+      ...(bank.filing !== undefined && bank.filing.levels.length > 0
+        ? [
+            `filed by ${levelsInWords(bank.filing.levels)}${
+              bank.filing.place === undefined ? '' : `: a new entry goes at \`${bank.filing.place}\``
+            }`,
+          ]
+        : bank.layout === 'projects'
+          ? ['filed by project: every memory sits under `projects/<org>/<project>/memories/`']
+          : []),
     ];
-    const home = bank.slug === LEGACY_BANK_HOME ? `${LEGACY_BANK_HOME}/` : `banks/${bank.slug}/`;
-    return `- \`${bank.slug}\` (${marks.join('; ')}) — its entries live under \`${home}\` in each project's memory and MEMORY.md index.`;
+    const home =
+      bank.home ?? (bank.slug === LEGACY_BANK_HOME ? LEGACY_BANK_HOME : `banks/${bank.slug}`);
+    const title = bank.name !== undefined && bank.name !== bank.slug ? ` (${bank.name})` : '';
+    const about = bank.description === undefined ? '' : ` — ${bank.description.trim().replace(/\.$/, '')}.`;
+    return `- \`${bank.slug}\`${title}${about} ${marks.join('; ')}. Its entries live under \`${home}/\` in each project's memory and MEMORY.md index.`;
   });
 
   const draftTarget = writable.find((bank) => bank.isDefault) ?? writable[0];
@@ -395,12 +468,13 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
    * `Managed by cerebro pull` in every memory file calls the whole system
    * "cerebro", and a user who named their bank `cortex` hears about a product
    * they did not set up. One sentence settles it, positionally: the verb stays
-   * in code spans, the bank keeps its name in prose. Skipped for the
-   * placeholder (nothing to name yet) and for a bank that *is* called `cerebro`
-   * — the legacy slug — where the sentence would contradict itself.
+   * in code spans, the bank keeps its name in prose. Only when the CLI is
+   * taught at all; skipped for the placeholder (nothing to name yet) and for a
+   * bank that *is* called `cerebro` — the legacy slug — where the sentence
+   * would contradict itself.
    */
   const naming =
-    banks.length > 0 && described.every((bank) => bank.slug !== LEGACY_BANK_HOME)
+    teachCli && banks.length > 0 && described.every((bank) => bank.slug !== LEGACY_BANK_HOME)
       ? plural
         ? '`cerebro` is the name of the command-line tool, not of a bank. Call each bank by its name above.'
         : `\`cerebro\` is the name of the command-line tool, not of the bank. The bank is called \`${fallback?.slug ?? TEAM_BANK_NAME_PLACEHOLDER}\`, and that is the name to use when you mention it.`
@@ -412,37 +486,83 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
       ? '## Team memory banks — shared, agent-maintained'
       : '## Team memory bank — shared, agent-maintained',
     plural
-      ? `This machine carries ${described.length} of your team's shared memory banks: git-backed, agent-maintained collections of durable facts — conventions, decisions, who owns what, where things live — one fact per file, installed into each project's agent memory.`
+      ? `This machine carries ${String(described.length)} of your team's shared memory banks: git-backed, agent-maintained collections of durable facts — conventions, decisions, who owns what, where things live — one fact per file, installed into each project's agent memory.`
       : `This machine carries your team's shared memory bank (\`${fallback?.slug ?? TEAM_BANK_NAME_PLACEHOLDER}\`): a git-backed, agent-maintained collection of durable team facts — conventions, decisions, who owns what, where things live — one fact per file, installed into each project's agent memory.`,
     lines.join('\n'),
     ...(naming === undefined ? [] : [naming]),
     // The command stays literal in the fenced block below; this sentence names
     // the system rather than the binary, so the user meets the thing they set up
     // instead of a program they will never type.
-    'Keeping the team\'s memory current is your job, not the user\'s. Never ask them whether something is worth remembering, and never ask them to run a memory-bank command themselves. You decide, you act, and you mention it in one line afterwards.',
-    `**Consult before guessing** about team conventions, ownership, or past decisions — read the team's entries in this project's MEMORY.md index. A fact the team has recorded is authoritative; your prior is not.`,
+    "Keeping the team's memory current is your job, not the user's. Never ask them whether something is worth remembering, and never ask them to run a memory-bank command themselves. You decide, you act, and you mention it in one line afterwards.",
+    `**Consult before guessing** about team conventions, ownership, or past decisions — read the team's entries in this project's MEMORY.md index${
+      tools ? ', and use `memory_search` for anything the index does not list' : ''
+    }. A fact the team has recorded is authoritative; your prior is not.`,
   );
 
+  /*
+   * The index itself, for a run whose harness will not load the memory file.
+   * After the consult rule and before the write rules, so it reads as the
+   * thing just referred to.
+   */
+  if (options.inlineIndex === true) {
+    for (const bank of described) {
+      if (bank.index === undefined || bank.index.text.trim().length === 0) continue;
+      parts.push(
+        `**What \`${bank.slug}\` holds for this project** (${String(bank.index.indexed)} of ${String(bank.index.total)} entries; the files are under \`${bank.home ?? `banks/${bank.slug}`}/\` in this project's memory):\n${bank.index.text}`,
+      );
+    }
+  }
+
   if (writable.length > 0) {
+    const routing = plural
+      ? tools
+        ? 'Route each fact to the bank whose readers need it (the `bank` argument selects one; never a read-only bank). '
+        : teachCli
+          ? 'Route each fact to the bank whose readers need it (`--bank <slug>` selects one; never a read-only bank). '
+          : 'Route each fact to the bank whose readers need it; never a read-only bank. '
+      : '';
     parts.push(
-      '**Record what you learn, unprompted.** When a durable, team-relevant fact surfaces that the code and git history do not already state — a decision made, a convention agreed, a gotcha diagnosed, infrastructure moved, who owns what — write it into the team\'s memory before the session ends:',
-      '```\ncerebro' + bankFlag + ' draft <slug> --type <user|feedback|project|reference>' + filingFlags + ' \\\n  --description "when is this relevant?" --body "the fact"\ncerebro' + bankFlag + ' promote --quiet\n```',
-      ...(nested && draftTarget !== undefined
-        ? [
-            `**Every memory in \`${draftTarget.slug}\` belongs to a project.** \`--org\` and \`--project\` name an existing folder \`projects/<org>/<project>/\` in the bank${
-              draftTarget.defaultOrg === undefined ? '' : ` (\`--org\` defaults to \`${draftTarget.defaultOrg}\`)`
-            }. Look at the bank's \`projects/\` tree and pick the project the fact is about before you draft; a draft that names no project, or a project that does not exist, is refused rather than filed, and you must never invent one.`,
-          ]
-        : []),
-      (plural
-        ? 'Route each fact to the bank whose readers need it (`--bank <slug>` selects one; never a read-only bank). '
-        : '') +
-        `Re-use an existing slug to update a stale memory, and \`cerebro${bankFlag} retire <slug>\` to remove one that has stopped being true. If \`cerebro\` is not on PATH, the CLI is at \`${fallback?.cli ?? 'bin/cerebro'}\`.`,
-      '**Scope repo-specific facts** with `--applies-to <repo-dir-name>` (repeatable, full directory names). Every memory is installed in every project, but only the repos it names index it into session context — so a fact about one repo does not dilute every other repo\'s index. Leave the flag off only when the fact holds across the team\'s repos.',
+      "**Record what you learn, unprompted.** When a durable, team-relevant fact surfaces that the code and git history do not already state — a decision made, a convention agreed, a gotcha diagnosed, infrastructure moved, who owns what — write it into the team's memory before the session ends" +
+        (tools
+          ? ', with the memory tools:'
+          : teachCli
+            ? ':'
+            : `, as a new file in the bank's checkout${
+                draftTarget?.filing?.place === undefined ? '' : ` at \`${draftTarget.filing.place}\` (\`{name}\` is the kebab-case slug)`
+              }, with the frontmatter the bank's other entries carry, on a branch, landed by a pull request.`),
+    );
+    if (tools) {
+      parts.push(
+        '```\nmemory_search  — check whether the fact is already recorded, and find the entry to update\nmemory_draft   — bank, name, description ("when is this relevant?"), body, type, and the filing labels the bank uses\nmemory_promote — validate the drafts and land them through the bank\'s own review path\nmemory_retire  — remove an entry that has stopped being true\n```',
+        `${routing}Re-use an existing name to update a stale memory rather than adding a second one.`,
+      );
+    } else if (teachCli) {
+      parts.push(
+        '```\ncerebro' + bankFlag + ' draft <slug> --type <user|feedback|project|reference>' + filingFlags + ' \\\n  --description "when is this relevant?" --body "the fact"\ncerebro' + bankFlag + ' promote --quiet\n```',
+        ...(nested && draftTarget !== undefined
+          ? [
+              `**Every memory in \`${draftTarget.slug}\` belongs to a project.** \`--org\` and \`--project\` name an existing folder \`projects/<org>/<project>/\` in the bank${
+                draftTarget.defaultOrg === undefined ? '' : ` (\`--org\` defaults to \`${draftTarget.defaultOrg}\`)`
+              }. Look at the bank's \`projects/\` tree and pick the project the fact is about before you draft; a draft that names no project, or a project that does not exist, is refused rather than filed, and you must never invent one.`,
+            ]
+          : []),
+        `${routing}Re-use an existing slug to update a stale memory, and \`cerebro${bankFlag} retire <slug>\` to remove one that has stopped being true. If \`cerebro\` is not on PATH, the CLI is at \`${fallback?.cli ?? 'bin/cerebro'}\`.`,
+      );
+    } else if (routing.length > 0) {
+      parts.push(routing.trim());
+    }
+    parts.push(
+      tools || !teachCli
+        ? "**Scope repo-specific facts** with `applies_to` (a list of full repository directory names). Every memory is installed in every project, but only the repos it names index it into session context — so a fact about one repo does not dilute every other repo's index. Leave it off only when the fact holds across the team's repos."
+        : "**Scope repo-specific facts** with `--applies-to <repo-dir-name>` (repeatable, full directory names). Every memory is installed in every project, but only the repos it names index it into session context — so a fact about one repo does not dilute every other repo's index. Leave the flag off only when the fact holds across the team's repos.",
       `**Which memory system gets it.** A fact a teammate would need goes to ${plural ? 'a team memory bank' : "the team's memory bank"}. Your own per-project memory is for what is true only of this user or this machine. When both would fit, choose the bank — it is the copy another person can read. Skip anything that only matters to this conversation.`,
       '**House style**: one fact per memory, absolute dates rather than relative ones ("2026-08-17", never "last week" or "recently"), repos and systems named explicitly, and a description written as a retrieval hook — "when is this relevant?", not a title. `feedback` and `project` memories also need `**Why:**` and `**How to apply:**` lines. Never draft secrets, credentials, or PII.',
-      '`draft` validates strictly and refuses on warnings as well as errors, because a memory that merely warns would open a pull request that can never merge. Being refused is ordinary, and the message names what to change — fix the sentence and run it again rather than abandoning the memory.',
-      'Every write goes through the bank\'s own gates: schema, secret scan and injection lint at draft, again at promote, and once more as a required check on the pull request, which merges itself when that check passes.',
+      tools
+        ? '`memory_draft` validates strictly and refuses on warnings as well as errors, because a memory that merely warns would open a pull request that can never merge. Being refused is ordinary, and the message names what to change — fix the sentence and try again rather than abandoning the memory.'
+        : teachCli
+          ? '`draft` validates strictly and refuses on warnings as well as errors, because a memory that merely warns would open a pull request that can never merge. Being refused is ordinary, and the message names what to change — fix the sentence and run it again rather than abandoning the memory.'
+          : "The bank's gates validate strictly and refuse on warnings as well as errors, because a memory that merely warns would open a pull request that can never merge. Being refused is ordinary, and the message names what to change — fix the sentence and try again rather than abandoning the memory.",
+      "Every write goes through the bank's own gates: schema, secret scan and injection lint when it is drafted, again when it is promoted, and once more as a required check on the pull request, which merges itself when that check passes.",
     );
   }
 
@@ -450,10 +570,11 @@ export function renderMemoryBanksPrompt(banks: readonly MemoryBankPromptInfo[]):
    * The bank's own words, last among the instructions and before the line
    * that demotes the bank's *contents* to reference. The two are different
    * things: a memory is a fact a teammate recorded, and is never an
-   * instruction; the `instructions` file is the bank's maintainers telling
-   * agents how the bank is read and written, opted into by name in the bank's
-   * own config. The reader only supplies it for a bank this machine may write
-   * to, so nothing here comes from a repository the user merely consumes.
+   * instruction; the instructions are the bank's maintainers telling agents
+   * how the bank is read and written, from its BANK.md or the file its
+   * config names. The reader only supplies them for a bank this machine may
+   * write to, so nothing here comes from a repository the user merely
+   * consumes.
    */
   for (const bank of described) {
     const notes = bank.instructions?.trim();
@@ -493,9 +614,9 @@ export const BUILT_IN_AGENT_PROMPTS: Readonly<Record<BuiltInPromptId, BuiltInAge
   // anyone who switched it off.
   'builtin:cerebro': {
     id: 'builtin:cerebro',
-    name: 'Use the team memory bank',
-    summary: "Consult and maintain your team's shared, agent-maintained memory bank.",
-    requires: 'At least one bank is set up and on in Settings → Team memory banks',
+    name: 'Use the team memory banks',
+    summary: "Consult and maintain your team's shared, agent-maintained memory banks — every bank the run's profile carries.",
+    requires: 'at least one bank is set up, on, and attached to the profile in Settings → Memory banks',
     markdown: MEMORY_BANKS_PROMPT,
   },
 };
@@ -605,6 +726,12 @@ function parsePrompt(value: unknown): AgentPrompt | undefined {
       builtIn !== undefined
         ? BUILT_IN_AGENT_PROMPTS[builtIn].name
         : (cleanString(value['name'], AGENT_PROMPT_LIMITS.name) ?? 'Untitled prompt'),
+    // The memory-banks prompt reaches every profile, and which banks it speaks
+    // of is decided per bank, in the banks' own registry. A scope stored for
+    // it by an older build — which offered a picker — would narrow delivery on
+    // top of that attachment, from a control the pane no longer shows, so it
+    // reads as `all` and is written back that way.
+    scope: builtIn === 'builtin:cerebro' ? { kind: 'all' } : scope,
     // A built-in that the user has not taken over carries no stored text —
     // theirs ships with Artemis — so anything found here for one is discarded
     // rather than becoming a shadow copy that disagrees with the version the
@@ -614,7 +741,6 @@ function parsePrompt(value: unknown): AgentPrompt | undefined {
         ? ''
         : (cleanString(value['markdown'], AGENT_PROMPT_LIMITS.markdown) ?? ''),
     enabled: value['enabled'] !== false,
-    scope,
     ...(builtIn === undefined ? {} : { builtIn }),
     ...(overridden ? { overridden: true } : {}),
   };
@@ -780,6 +906,8 @@ export interface ComposeAgentPromptsOptions {
    * that teaches the right verbs.
    */
   readonly memoryBanks?: readonly MemoryBankPromptInfo[];
+  /** How the banks are rendered — whether the index rides in the prompt. */
+  readonly memoryBanksOptions?: RenderMemoryBanksOptions;
 }
 
 /**
@@ -818,7 +946,7 @@ export function composeAgentPrompts(
       prompt.overridden !== true &&
       options.memoryBanks !== undefined &&
       options.memoryBanks.length > 0
-        ? renderMemoryBanksPrompt(options.memoryBanks).trim()
+        ? renderMemoryBanksPrompt(options.memoryBanks, options.memoryBanksOptions ?? {}).trim()
         : promptText(prompt).trim();
     if (text.length === 0) continue;
     parts.push(text);

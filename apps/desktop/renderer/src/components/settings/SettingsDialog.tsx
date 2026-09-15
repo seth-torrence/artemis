@@ -53,6 +53,7 @@ import { useEffect, useRef, type ReactElement } from 'react';
 import {
   BotIcon,
   BoxesIcon,
+  BrainIcon,
   CalendarClockIcon,
   CastIcon,
   GaugeIcon,
@@ -71,6 +72,7 @@ import { AdvancedSection } from './AdvancedSection';
 import { AppearanceSection } from './AppearanceSection';
 import { InstructionsSection } from './InstructionsSection';
 import { KeyManagersSection } from './KeyManagersSection';
+import { MemoryBanksSection } from './MemoryBanksSection';
 import { ModelsSection } from './ModelsSection';
 import { PermissionsSection } from './PermissionsSection';
 import { RemoteSection } from './RemoteSection';
@@ -160,14 +162,25 @@ export const SETTINGS_NAV: readonly NavBand[] = [
       },
       // The id keeps its historical name: deep links (`openSettings('agents')`)
       // predate the rename, and an id is an address, not a label. The pane
-      // holds the standing prompts *and* the memory banks — the rule and its
-      // best instance, in that order; see `InstructionsSection` for the
-      // argument, which used to live here as a note about their adjacency.
+      // holds the standing prompts — text the user writes and every run
+      // carries.
       {
         id: 'agents',
         label: 'Instructions',
-        hint: 'Prompts and memory banks',
+        hint: 'Standing prompts',
         icon: <BotIcon aria-hidden="true" />,
+      },
+      // Directly under Instructions, because it is the same question answered
+      // by a repository instead of by a paragraph: the prompts are what the
+      // user states, a bank is what the agents maintain. They shared a pane
+      // for a while and the banks outgrew it — a bank now carries a name, a
+      // format, a set of profiles and a validation report, none of which fits
+      // under someone else's heading.
+      {
+        id: 'memory-banks',
+        label: 'Memory banks',
+        hint: 'Shared facts agents keep',
+        icon: <BrainIcon aria-hidden="true" />,
       },
       // After what the agent is told, what it is allowed: the browser
       // switches live in here now — "whose browser" was always a permission
@@ -428,8 +441,10 @@ function SectionBody({ section }: { readonly section: SettingsSection }): ReactE
     case 'browser':
       return <PermissionsSection />;
     case 'agents':
-    case 'cerebro':
       return <InstructionsSection />;
+    case 'memory-banks':
+    case 'cerebro':
+      return <MemoryBanksSection />;
     case 'secrets':
       return <KeyManagersSection />;
     case 'server':

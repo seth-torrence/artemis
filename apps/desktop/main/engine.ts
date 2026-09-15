@@ -204,6 +204,23 @@ export function builtInsFor(
   return rest;
 }
 
+/**
+ * Does this provider need each bank's index carried in the prompt itself?
+ *
+ * A Claude profile's harness loads the project's `MEMORY.md`, where the same
+ * budgeted index already sits between the banks' markers — inlining it would
+ * put every line in front of the model twice and pay for it twice. Every other
+ * harness (a local model, Codex, an ACP agent) loads no such file, and for
+ * those the index in the prompt is the whole of what makes the bank reachable:
+ * without it the agent knows a bank exists and nothing about what is in it.
+ *
+ * Pure, and named, because it is a claim about other people's harnesses rather
+ * than a preference — the sort of thing that should be stated once and tested.
+ */
+export function inlineBankIndex(providerId: string): boolean {
+  return providerId !== 'claude';
+}
+
 export function withSystemPromptAppended(input: RunInput, text: string | undefined): RunInput {
   if (text === undefined || text.length === 0) return input;
 
@@ -874,17 +891,22 @@ function createEngine(options: EngineOptions): ArtemisEngine {
    * change while the app is open — adding a bank is a button in the settings
    * dialog, and a user who clicks it should not have to restart before the
    * prompt that describes it starts arriving. Both halves are cheap at that
-   * rate: a cached file read and a registry read with a few `existsSync`s. The
-   * full status probe, which spawns the CLI, is not.
+   * rate: a cached file read, and a registry read with a couple of `stat`s per
+   * bank. Nothing here spawns.
+   *
+   * Asked **of the run's profile**. A bank can be attached to one account and
+   * not another, and a profile that carries no bank has nothing for the
+   * built-in to describe — so the prompt is withheld there rather than
+   * describing somebody else's banks.
    *
    * Configured **and** switched on. Banks being registered is not consent to
    * spending every run's context describing them, so a machine that has them
    * but has not said yes gets the prompt withheld however enabled its row is —
    * which is exactly what `BuiltInAgentPrompt.requires` exists to explain.
    */
-  const availableBuiltIns = (): ReadonlySet<BuiltInPromptId> => {
+  const availableBuiltIns = (profileId: ProfileId): ReadonlySet<BuiltInPromptId> => {
     const available = new Set<BuiltInPromptId>();
-    if (isMasterEnabled() && anyBankAvailable()) available.add('builtin:cerebro');
+    if (isMasterEnabled() && anyBankAvailable(profileId)) available.add('builtin:cerebro');
     return available;
   };
 
@@ -918,13 +940,19 @@ function createEngine(options: EngineOptions): ArtemisEngine {
 
     try {
       const { prompts } = await agentPrompts.read();
-      const available = builtInsFor(input.providerId, availableBuiltIns());
+      const available = builtInsFor(input.providerId, availableBuiltIns(input.profileId));
       const text = composeAgentPrompts(prompts, {
         profileId: input.profileId,
         availableBuiltIns: available,
-        // The banks by name, so the composed prompt teaches this machine's
-        // slugs and read-only rules instead of the generic preview.
-        ...(available.has('builtin:cerebro') ? { memoryBanks: promptBanks() } : {}),
+        // The banks this profile carries, described against the project the run
+        // starts in: their own names, how they are filed, and the index of the
+        // entries that apply here.
+        ...(available.has('builtin:cerebro')
+          ? {
+              memoryBanks: promptBanks(input.profileId, input.cwd),
+              memoryBanksOptions: { inlineIndex: inlineBankIndex(input.providerId) },
+            }
+          : {}),
       });
       return withSystemPromptAppended(input, text);
     } catch (error) {
@@ -1494,11 +1522,11 @@ function createEngine(options: EngineOptions): ArtemisEngine {
 
     startRun: async (input) => {
       // The banks' own `SessionStart` hook cannot run under `settingSources:
-      // []`, so Artemis runs the sync cycle itself — one spawn, every enabled
-      // bank. Started before the run and never awaited: it promotes what the
-      // last session drafted and pulls what teammates landed, neither of which
-      // this run may wait on. The run's directory goes along so the bank is
-      // installed for the project about to start — see the function.
+      // []`, so Artemis keeps the banks turning itself. The install half is
+      // synchronous and finishes before the run starts — that is what puts the
+      // bank in this project's memory the first time it is opened — and the
+      // pull half is fired and forgotten, because fetching what teammates
+      // landed is the next run's business and this one may not wait on it.
       syncMemoryBanksInBackground(input.cwd);
 
       // Every enabled bank is attached to the run as a directory it may read.
@@ -1509,7 +1537,7 @@ function createEngine(options: EngineOptions): ArtemisEngine {
       // with banks off or none configured starts exactly the run it would have.
       const bankDirs = mergeAdditionalDirectories(
         input.additionalDirectories,
-        isMasterEnabled() ? banksForRun().map((bank) => bank.path) : [],
+        isMasterEnabled() ? banksForRun(input.profileId).map((bank) => bank.path) : [],
         isMasterEnabled(),
       );
       const withBanks =

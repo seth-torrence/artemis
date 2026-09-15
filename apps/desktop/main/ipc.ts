@@ -70,6 +70,7 @@ import {
   retireMemoryBankMemory,
   setMasterEnabled,
   setMemoryBankEnabled,
+  setMemoryBankProfiles,
   syncMemoryBank,
   verifyMemoryBankRemote,
   promptBanks,
@@ -187,6 +188,7 @@ import {
   validateMemoryBankMemories,
   validateMemoryBankRetire,
   validateMemoryBankSetEnabled,
+  validateMemoryBankSetProfiles,
   validateMemoryBankSync,
   validateMemoryBanksPreflight,
   validateMemoryBanksSetMasterEnabled,
@@ -660,6 +662,16 @@ export function registerIpcHandlers(options: IpcLayerOptions): IpcLayer {
     [IPC.memoryBankSetEnabled]: {
       validate: validateMemoryBankSetEnabled,
       handle: async (request) => setMemoryBankEnabled(request),
+    },
+
+    /*
+     * Artemis's own record, in Artemis's own registry: the CLI's config has no
+     * room for a profile scope. The installs follow the write, which is why
+     * this answers with a message like the other write channels.
+     */
+    [IPC.memoryBankSetProfiles]: {
+      validate: validateMemoryBankSetProfiles,
+      handle: async (request) => setMemoryBankProfiles(request),
     },
 
     [IPC.memoryBankForget]: {
