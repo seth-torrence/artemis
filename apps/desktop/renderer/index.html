@@ -11,18 +11,22 @@
   comes up dark and correct rather than unstyled, and the store's own pass at
   module load still corrects it a moment later.
 
-  One rule governs everything above the real head element, this comment
-  included: do not write the opening or closing head or body tag out, not even
-  inside backticks. Vite chooses where to inject by running a plain regular
-  expression over this file's raw text — first thing that looks like the tag
-  wins, comments and all — so a tag named in prose swallows whatever belongs
-  at that point. Named here, it swallows the dev client and the React Fast
+  One rule governs this whole file, this comment included: the opening and
+  closing head and body tags each appear exactly once, as elements. Never write
+  one anywhere else — not in prose, not in a comment, not inside backticks, not
+  in a string in the boot script. Vite chooses where to inject by running a
+  plain regular expression over this file's raw text and taking the first
+  match, comments and all, so a second mention of a tag can take the place of
+  whatever belongs at it.
+
+  Mentioned above the real element, it takes the dev client and the React Fast
   Refresh preamble: neither runs, every component module then throws
   "@vitejs/plugin-react can't detect preamble", and `pnpm dev` opens a blank
   window. A packaged build is unaffected, because its stylesheet and script
-  tags are injected before the closing tag instead, and that is what makes this
-  a trap rather than a typo — the release looks right while every contributor's
-  dev server is dead. `index-html-injection.test.ts` fails if it drifts back.
+  tags are injected before the closing tag instead — and that is what makes
+  this a trap rather than a typo: the release looks right while every
+  contributor's dev server is dead. `index-html-injection.test.ts` counts the
+  occurrences and fails at two.
 -->
 <html lang="en" class="dark">
   <head>
