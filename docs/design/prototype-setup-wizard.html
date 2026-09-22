@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE — Set up wizard shell (three variants)</title>
+<!--
+  PROTOTYPE, throwaway. Wayfinder ticket: "Prototype: the wizard shell, first-run screen and Set up pane"
+  (david/artemis on Forgejo, issue 19). Three structurally different takes on the wizard shell, switchable
+  with ?variant=A|B|C (or the floating bar, or the arrow keys). Two more switches surface the state the
+  shell has to serve:
+    ?mode=firstrun   the whole window, no profile yet          ?mode=settings   the same wizard as the Set up pane
+    ?state=fresh     nothing configured                          ?state=partial   a re-run: some green, one amber, one red, two skipped
+  Colour tokens are the shipped 7D palette (docs/design/7d-full.html). Layout is the variable here, so it is not shared.
+  Open the file in a browser; nothing to build.
+-->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+:root{
+  --void:oklch(14% 0 0);--bg:oklch(15.5% 0 0);--chrome:oklch(19.5% 0 0);--well:oklch(17% 0 0);--bar:oklch(22.5% 0 0);
+  --line:oklch(33.5% 0 0);--line-2:oklch(56.5% 0 0);--ink:oklch(96% 0 0);--ink-2:oklch(77% 0 0);--ink-3:oklch(62% 0 0);
+  --accent:oklch(52% 0.21 264);--accent-ink:oklch(97% 0.014 264);--accent-text:oklch(61.5% 0.14 264);
+  --ok:oklch(84% 0.17 150);--warn:oklch(85% 0.155 85);--err:oklch(70% 0.18 25);
+  --hair:1px solid color-mix(in srgb,var(--ink) 9%,transparent);--hair-in:1px solid color-mix(in srgb,var(--ink) 12%,transparent);
+  --r:8px;--r-ctl:6px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--void);color:var(--ink);font:13px/1.45 Archivo,system-ui,sans-serif}
+code,.mono{font-family:"JetBrains Mono",monospace;font-size:12px}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+h1,h2,h3{margin:0;font-weight:600}
+h1{font-size:20px}h2{font-size:15px}h3{font-size:13px}
+p{margin:0}
+.muted{color:var(--ink-2)}.faint{color:var(--ink-3)}
+.btn{height:30px;padding:0 12px;border-radius:var(--r-ctl);border:var(--hair-in);background:var(--bar);color:var(--ink);font-weight:500}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.btn.ghost{background:none;border-color:transparent;color:var(--ink-2)}
+.btn.sm{height:24px;padding:0 9px;font-size:12px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--line-2);flex:none}
+.dot.done{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.err{background:var(--err)}.dot.skip{background:transparent;border:1.5px solid var(--line-2)}
+.dot.cur{background:var(--accent-text);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-text) 25%,transparent)}
+.tag{font-size:11px;padding:1px 6px;border-radius:999px;border:var(--hair-in);color:var(--ink-2)}
+.tag.opt{color:var(--ink-3)}
+.window{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg)}
+.titlebar{height:36px;display:flex;align-items:center;padding:0 14px;gap:8px;border-bottom:var(--hair);color:var(--ink-3);font-size:12px;flex:none}
+.titlebar .traffic{display:flex;gap:6px}.titlebar .traffic i{width:11px;height:11px;border-radius:50%;background:var(--bar);display:block}
+.body{flex:1;min-height:0;position:relative}
+
+/* ---- step content (shared across variants: the content is not the variable) ---- */
+.content h1{margin-bottom:4px}
+.content .lede{color:var(--ink-2);max-width:56ch;margin-bottom:18px}
+.choices{display:grid;gap:8px;max-width:620px}
+.choice{display:flex;gap:12px;align-items:flex-start;padding:12px 14px;border:var(--hair-in);border-radius:var(--r);background:var(--chrome)}
+.choice.on{border-color:var(--accent-text);background:color-mix(in srgb,var(--accent) 12%,var(--chrome))}
+.choice .ico{width:30px;height:30px;border-radius:7px;background:var(--bar);display:grid;place-items:center;font-weight:600;color:var(--ink-2);flex:none}
+.choice b{display:block;font-weight:600}.choice small{color:var(--ink-2);display:block;margin-top:2px}
+.group-label{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-3);margin:14px 0 6px}
+.attention{border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);background:color-mix(in srgb,var(--warn) 7%,transparent);border-radius:var(--r);padding:12px 14px;max-width:620px;margin-bottom:14px}
+.attention b{color:var(--warn)}
+.actions{display:flex;gap:8px;align-items:center;margin-top:18px}
+.actions .spacer{flex:1}
+.notcarried{font-size:12px;color:var(--ink-3);max-width:56ch;margin-top:14px}
+
+/* ---- settings dialog frame (mode=settings) ---- */
+.scrim{position:absolute;inset:0;background:color-mix(in srgb,var(--void) 70%,transparent);display:grid;place-items:center}
+.dialog{width:min(1040px,94%);height:min(680px,90%);background:var(--chrome);border:var(--hair-in);border-radius:10px;display:flex;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.nav{width:210px;flex:none;border-right:var(--hair);padding:12px 8px;overflow:auto}
+.nav .band{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-3);padding:10px 8px 4px}
+.nav .row{display:flex;flex-direction:column;padding:6px 8px;border-radius:6px;color:var(--ink-2)}
+.nav .row small{color:var(--ink-3);font-size:11px}
+.nav .row.on{background:var(--bar);color:var(--ink)}
+.pane{flex:1;min-width:0;display:flex;flex-direction:column}
+.pane-head{padding:16px 22px 10px;border-bottom:var(--hair)}
+.pane-body{flex:1;min-height:0;position:relative;overflow:auto}
+
+/* ---- Variant A: rail ---- */
+.A{display:flex;height:100%}
+.A .rail{width:280px;flex:none;border-right:var(--hair);padding:22px 14px;overflow:auto;background:var(--chrome)}
+.A .rail h2{padding:0 8px 12px;font-size:13px;color:var(--ink-2);font-weight:500}
+.A .step{display:flex;align-items:center;gap:10px;padding:8px 8px;border-radius:6px;color:var(--ink-2)}
+.A .step.cur{background:var(--bar);color:var(--ink)}
+.A .step .n{width:18px;color:var(--ink-3);font-variant-numeric:tabular-nums;font-size:12px}
+.A .step .t{flex:1}.A .step .t small{display:block;color:var(--ink-3);font-size:11px}
+.A .main{flex:1;min-width:0;overflow:auto;padding:34px 40px}
+.A .foot{position:sticky;bottom:0;background:linear-gradient(transparent,var(--bg) 30%);padding-top:24px}
+.compact .A .rail{width:230px;padding:14px 10px}.compact .A .main{padding:22px 26px}
+
+/* ---- Variant B: ledger ---- */
+.B{height:100%;overflow:auto;padding:30px 0 60px}
+.B .wrap{max-width:760px;margin:0 auto;padding:0 24px}
+.B .summary{display:flex;align-items:center;gap:14px;padding:14px 16px;border:var(--hair-in);border-radius:var(--r);background:var(--chrome);margin:16px 0 18px}
+.B .summary .bar{flex:1;height:6px;border-radius:3px;background:var(--well);overflow:hidden;display:flex}
+.B .summary .bar i{display:block;height:100%}
+.B .ledger{border:var(--hair-in);border-radius:var(--r);background:var(--chrome);overflow:hidden}
+.B .lrow{display:flex;align-items:center;gap:12px;padding:11px 16px;border-top:var(--hair)}
+.B .lrow:first-child{border-top:0}
+.B .lrow .n{width:18px;color:var(--ink-3);font-size:12px}
+.B .lrow .t{flex:1}.B .lrow .t small{display:block;color:var(--ink-3);font-size:12px}
+.B .lrow.open{background:var(--bg)}
+.B .inline{padding:6px 16px 18px 46px;border-top:var(--hair);background:var(--bg)}
+.B .inline .content h1{font-size:15px}
+.compact .B{padding:14px 0 40px}
+
+/* ---- Variant C: cards ---- */
+.C{height:100%;overflow:auto;display:flex;flex-direction:column;align-items:center;padding:34px 24px 60px}
+.C .dots{display:flex;gap:10px;align-items:center;margin-bottom:22px}
+.C .dots .dot{width:9px;height:9px}
+.C .card{width:min(680px,100%);background:var(--chrome);border:var(--hair-in);border-radius:12px;padding:30px 34px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.C .card .kicker{font-size:12px;color:var(--ink-3);margin-bottom:6px}
+.C .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;width:min(900px,100%)}
+.C .tile{padding:14px;border:var(--hair-in);border-radius:var(--r);background:var(--chrome);display:flex;flex-direction:column;gap:6px;min-height:96px;text-align:left}
+.C .tile b{font-weight:600}.C .tile small{color:var(--ink-3);font-size:12px}
+.C .tile.warn{border-color:color-mix(in srgb,var(--warn) 45%,transparent)}.C .tile.err{border-color:color-mix(in srgb,var(--err) 45%,transparent)}
+.C .tile .st{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}
+.compact .C{padding:16px 16px 40px}.compact .C .card{padding:20px 22px}
+
+/* ---- floating switcher (not part of the design) ---- */
+#switch{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:99;display:flex;gap:8px;align-items:center;background:#111;color:#fff;border:1px solid #444;border-radius:999px;padding:6px 10px;font:12px/1 "JetBrains Mono",monospace;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+#switch button{color:#fff;padding:4px 8px;border-radius:999px}
+#switch button:hover{background:#333}
+#switch .lab{padding:0 6px;min-width:190px;text-align:center}
+#switch .seg{display:flex;border:1px solid #444;border-radius:999px;overflow:hidden}
+#switch .seg button.on{background:#fff;color:#000}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="switch"></div>
+<script>
+// ------------------------------------------------------------------ data
+const STEPS = [
+  {k:'account',    name:'Account',           hint:'Which agent runs your conversations', opt:false},
+  {k:'carry',      name:'Carry over',        hint:'Your existing Claude Code or Codex',   opt:false},
+  {k:'bank',       name:'Memory bank',       hint:'Facts your agents keep',              opt:false},
+  {k:'skills',     name:'Skills',            hint:'Procedures agents can load',          opt:false},
+  {k:'secrets',    name:'Key manager',       hint:'Secrets fetched, not stored',         opt:true},
+  {k:'instr',      name:'Instructions',      hint:'What every conversation is told',     opt:false},
+  {k:'server',     name:'Server & remote',   hint:'One machine, or several',             opt:true},
+  {k:'browser',    name:'Browser',           hint:'Let agents drive your Chrome',        opt:true},
+  {k:'perm',       name:'Permissions',       hint:'What runs without asking',            opt:false},
+  {k:'look',       name:'Appearance',        hint:'Theme, width and layout',             opt:false},
+];
+// health per step in the partial (re-run) state: done | warn | err | skip | todo
+const PARTIAL = {
+  account:{h:'done', line:'Claude · signed in as david@… · 2 profiles'},
+  carry:  {h:'done', line:'Using ~/.claude in place · 412 conversations'},
+  bank:   {h:'err',  line:'cortex: remote unreachable — token expired 3 days ago'},
+  skills: {h:'done', line:'2 repositories · pulled 3 minutes ago · unslop always on'},
+  secrets:{h:'skip', line:'Skipped · optional'},
+  instr:  {h:'done', line:'6 instructions on · 3 generated'},
+  server: {h:'skip', line:'Just this machine'},
+  browser:{h:'warn', line:'Paired: Chrome on Windows · not connected — open Chrome'},
+  perm:   {h:'done', line:'Default: ask before shell commands · built-in browser'},
+  look:   {h:'done', line:'Dark · comfortable width'},
+};
+const FRESH = Object.fromEntries(STEPS.map(s=>[s.k,{h:'todo',line:s.opt?'Optional':'Not set up yet'}]));
+
+const q = new URLSearchParams(location.search);
+const state = {
+  variant: (q.get('variant')||'A').toUpperCase(),
+  mode: q.get('mode')||'firstrun',
+  data: q.get('state')||'fresh',
+  step: q.get('step'),   // key of the step being shown, else first non-done
+};
+function health(){ return state.data==='partial' ? PARTIAL : FRESH; }
+function currentStep(){
+  if (state.step) return state.step;
+  const h = health();
+  const first = STEPS.find(s=>['todo','err','warn'].includes(h[s.k].h));
+  return (first||STEPS[0]).k;
+}
+function setQ(k,v){ const u=new URL(location); if(v==null)u.searchParams.delete(k); else u.searchParams.set(k,v); history.replaceState(null,'',u); render(); }
+function stepIndex(k){ return STEPS.findIndex(s=>s.k===k); }
+const STATUS_WORD={done:'Done',warn:'Needs attention',err:'Needs attention',skip:'Skipped',todo:'To do'};
+
+// ------------------------------------------------------------------ step content (same in every variant)
+function stepContent(k, compact){
+  const h = health()[k];
+  const s = STEPS[stepIndex(k)];
+  let body='';
+  if (k==='account'){
+    body = `
+      <h1>Connect an agent</h1>
+      <p class="lede">Artemis runs conversations through an agent you already pay for, or a model on this machine. You can add more later.</p>
+      <div class="group-label">Signed in to an account</div>
+      <div class="choices">
+        <button class="choice on"><span class="ico">C</span><span><b>Claude Code</b><small>Found ~/.claude, signed in as david@… — continue with it, or make a fresh profile</small></span></button>
+        <button class="choice"><span class="ico">X</span><span><b>Codex</b><small>OpenAI's coding agent. You will sign in from your terminal, once.</small></span></button>
+        <button class="choice"><span class="ico">O</span><span><b>OpenCode</b><small>Cannot take standing instructions or skills. Fine for a second account.</small></span></button>
+      </div>
+      <div class="group-label">Running on this machine</div>
+      <div class="choices">
+        <button class="choice"><span class="ico">⌂</span><span><b>Ollama on this machine</b><small>Answering on port 11434 · 3 models: qwen3.8:27b, gemma4, llama4-scout</small></span></button>
+        <button class="choice"><span class="ico">⌂</span><span><b>LM Studio</b><small>Not running. Start it with the local server on and this row fills in.</small></span></button>
+        <button class="choice"><span class="ico">…</span><span><b>Another address</b><small>llama.cpp, a server elsewhere, or a port that is not the default</small></span></button>
+      </div>`;
+  } else if (k==='bank' && h.h==='err'){
+    body = `
+      <h1>Memory bank</h1>
+      <div class="attention"><b>cortex needs attention.</b> Its remote cannot be reached: the GitHub token expired on 19 Sep. Nothing has synced since. Agents still read the copy on this machine.</div>
+      <div class="choices">
+        <button class="choice on"><span class="ico">↻</span><span><b>Renew the GitHub token</b><small>Uses the gh CLI signed in on this machine. No paste needed.</small></span></button>
+        <button class="choice"><span class="ico">⌨</span><span><b>Paste a new token</b><small>A fine-grained token with Contents and Administration on the cortex repo.</small></span></button>
+        <button class="choice"><span class="ico">–</span><span><b>Leave it</b><small>Keep reading the local copy; the step stays red.</small></span></button>
+      </div>`;
+  } else if (k==='browser' && h.h==='warn'){
+    body = `
+      <h1>Browser</h1>
+      <div class="attention"><b>Chrome on Windows is paired but not connected.</b> The extension only runs while Chrome is open. Open Chrome and, if it asks, dismiss the developer-mode notice; this turns green by itself.</div>
+      <div class="actions"><button class="btn">Check again</button><button class="btn ghost">Unpair</button></div>`;
+  } else if (k==='carry'){
+    body = `
+      <h1>Carry over what you have</h1>
+      <p class="lede">You already use Claude Code. Your login and every conversation can appear here without moving anything.</p>
+      <div class="choices">
+        <button class="choice on"><span class="ico">✓</span><span><b>Use my existing account and conversations</b><small>Points this profile at ~/.claude. 412 conversations, 14 skills, 3 commands.</small></span></button>
+        <button class="choice"><span class="ico">＋</span><span><b>Start fresh</b><small>A separate profile directory. Sign in again; nothing shared.</small></span></button>
+      </div>
+      <p class="notcarried">Hooks, MCP servers and permission rules in your settings.json do not carry over. Artemis configures those itself, in the steps that follow.</p>`;
+  } else {
+    body = `
+      <h1>${s.name}</h1>
+      <p class="lede">${s.hint}. ${h.h==='done'?'Already set up: '+h.line+'.':h.h==='skip'?'You skipped this last time.':'Placeholder for the step content; the shell is what this prototype is about.'}</p>
+      <div class="choices"><div class="choice"><span class="ico">·</span><span><b>Step content goes here</b><small>Each step's real form is its own ticket.</small></span></div></div>`;
+  }
+  return `<div class="content">${body}</div>`;
+}
+function actionRow(k, opts={}){
+  const s = STEPS[stepIndex(k)]; const i=stepIndex(k);
+  return `<div class="actions">
+    ${i>0?`<button class="btn ghost" onclick="setQ('step','${STEPS[i-1].k}')">Back</button>`:''}
+    <span class="spacer"></span>
+    ${s.opt||opts.skippable?`<button class="btn ghost" onclick="setQ('step','${(STEPS[i+1]||STEPS[i]).k}')">Skip for now</button>`:''}
+    <button class="btn primary" onclick="setQ('step','${(STEPS[i+1]||STEPS[i]).k}')">${i===STEPS.length-1?'Finish':'Continue'}</button>
+  </div>`;
+}
+
+// ------------------------------------------------------------------ Variant A: rail
+function variantA(compact){
+  const cur=currentStep(); const h=health();
+  const doneCount=STEPS.filter(s=>h[s.k].h==='done').length;
+  return `<div class="A">
+    <aside class="rail">
+      <h2>${state.mode==='firstrun'?'Set up Artemis':`Set up · ${doneCount} of ${STEPS.length} done`}</h2>
+      ${STEPS.map((s,i)=>`<button class="step ${s.k===cur?'cur':''}" onclick="setQ('step','${s.k}')">
+        <span class="dot ${s.k===cur?'cur':h[s.k].h}"></span>
+        <span class="n">${i+1}</span>
+        <span class="t">${s.name}${s.opt?' <span class="tag opt">optional</span>':''}<small>${h[s.k].h==='todo'?s.hint:h[s.k].line}</small></span>
+      </button>`).join('')}
+    </aside>
+    <section class="main">
+      ${stepContent(cur,compact)}
+      <div class="foot">${actionRow(cur)}</div>
+    </section>
+  </div>`;
+}
+
+// ------------------------------------------------------------------ Variant B: ledger
+function variantB(compact){
+  const cur=currentStep(); const h=health();
+  const counts={done:0,warn:0,err:0,skip:0,todo:0}; STEPS.forEach(s=>counts[h[s.k].h]++);
+  const seg=(n,c)=>n?`<i style="width:${n/STEPS.length*100}%;background:${c}"></i>`:'';
+  const line = state.data==='partial'
+    ? `${counts.done} done · ${counts.warn+counts.err} need attention · ${counts.skip} skipped`
+    : `Nothing set up yet. Start at the top; each row opens in place.`;
+  return `<div class="B"><div class="wrap">
+    <h1>${state.mode==='firstrun'?'Set up Artemis':'Set up'}</h1>
+    <p class="muted">Everything Artemis needs, on one page. Come back any time; each row checks itself.</p>
+    <div class="summary"><span>${line}</span><span class="bar">${seg(counts.done,'var(--ok)')}${seg(counts.warn,'var(--warn)')}${seg(counts.err,'var(--err)')}${seg(counts.skip,'var(--line)')}</span>
+      ${state.data==='partial'?`<button class="btn sm">Check all again</button>`:''}</div>
+    <div class="ledger">
+      ${STEPS.map((s,i)=>{
+        const open = s.k===cur;
+        return `<div class="lrow ${open?'open':''}">
+          <span class="dot ${h[s.k].h}"></span><span class="n">${i+1}</span>
+          <span class="t">${s.name}${s.opt?' <span class="tag opt">optional</span>':''}<small>${h[s.k].line}</small></span>
+          <span class="faint" style="font-size:12px">${STATUS_WORD[h[s.k].h]}</span>
+          <button class="btn sm ${open?'':'ghost'}" onclick="setQ('step','${s.k}')">${h[s.k].h==='done'?'Change':h[s.k].h==='todo'?'Set up':'Fix'}</button>
+        </div>${open?`<div class="inline">${stepContent(s.k,true)}${actionRow(s.k)}</div>`:''}`;
+      }).join('')}
+    </div>
+  </div></div>`;
+}
+
+// ------------------------------------------------------------------ Variant C: cards
+function variantC(compact){
+  const cur=currentStep(); const h=health();
+  const summary = state.mode==='settings' && !state.step;
+  if (summary){
+    return `<div class="C">
+      <div style="width:min(900px,100%);margin-bottom:16px"><h1>Set up</h1><p class="muted">Each tile checks itself. Open one to change it; anything amber or red tells you what to do.</p></div>
+      <div class="grid">${STEPS.map((s,i)=>`<button class="tile ${h[s.k].h}" onclick="setQ('step','${s.k}')">
+        <span class="st"><span class="dot ${h[s.k].h}"></span>${STATUS_WORD[h[s.k].h]}${s.opt?' · optional':''}</span>
+        <b>${s.name}</b><small>${h[s.k].line}</small></button>`).join('')}</div>
+      <div class="actions" style="width:min(900px,100%)"><span class="spacer"></span><button class="btn">Check all again</button><button class="btn primary" onclick="setQ('step','account')">Walk through again</button></div>
+    </div>`;
+  }
+  const i=stepIndex(cur);
+  return `<div class="C">
+    <div class="dots">${STEPS.map(s=>`<button class="dot ${s.k===cur?'cur':h[s.k].h}" title="${s.name}" onclick="setQ('step','${s.k}')"></button>`).join('')}</div>
+    <div class="card">
+      <div class="kicker">Step ${i+1} of ${STEPS.length}${STEPS[i].opt?' · optional':''}${state.mode==='settings'?' · <a href="#" onclick="setQ(\'step\',null);return false" style="color:var(--accent-text)">back to overview</a>':''}</div>
+      ${stepContent(cur,compact)}
+      ${actionRow(cur)}
+    </div>
+  </div>`;
+}
+
+// ------------------------------------------------------------------ frames
+const VARIANTS={A:{name:'Rail: steps beside the content',fn:variantA},B:{name:'Ledger: one page, rows open in place',fn:variantB},C:{name:'Cards: one step at a time, tiles when done',fn:variantC}};
+const NAV=[
+  ['',[['Set up','First run and health',true]]],
+  ['Accounts',[['Profiles','Accounts and sign-in'],['Models','Catalogue and quick access'],['Runs','Speed, spend, handover']]],
+  ['Knowledge',[['Memory banks','Shared facts agents keep'],['Skills','Procedures agents can load'],['Instructions','Standing prompts']]],
+  ['Access',[['Permissions','What runs without asking'],['Browser','Pair a Chrome, and its rules'],['Key managers','Secrets fetched, not stored']]],
+  ['Automation',[['Routines','Runs on a schedule']]],
+  ['Machines',[['Server','Lend models to other apps'],['Remote','Drive another machine'],['This machine','Scripts, folders, updates']]],
+  ['',[['Appearance','Theme, width and layout'],['About','Version and updates']]],
+];
+function settingsFrame(inner){
+  return `<div class="scrim"><div class="dialog">
+    <nav class="nav">${NAV.map(([band,rows])=>`${band?`<div class="band">${band}</div>`:''}${rows.map(([n,h,on])=>`<div class="row ${on?'on':''}">${n}<small>${h}</small></div>`).join('')}`).join('')}</nav>
+    <div class="pane"><div class="pane-body compact">${inner}</div></div>
+  </div></div>`;
+}
+function render(){
+  const v=VARIANTS[state.variant]||VARIANTS.A;
+  const inner=v.fn(state.mode==='settings');
+  document.getElementById('root').innerHTML=`<div class="window">
+    <div class="titlebar"><span class="traffic"><i></i><i></i><i></i></span><span>Artemis</span><span class="faint">— ${state.mode==='firstrun'?'first run, no profile yet':'Settings › Set up'}</span></div>
+    <div class="body">${state.mode==='settings'?settingsFrame(inner):inner}</div>
+  </div>`;
+  const keys=Object.keys(VARIANTS); const i=keys.indexOf(state.variant);
+  const seg=(name,vals)=>`<span class="seg">${vals.map(x=>`<button class="${state[name]===x?'on':''}" onclick="setQ('${name==='data'?'state':name}','${x}')">${x}</button>`).join('')}</span>`;
+  document.getElementById('switch').innerHTML=`
+    <button onclick="setQ('variant','${keys[(i-1+keys.length)%keys.length]}')">←</button>
+    <span class="lab">${state.variant} · ${v.name}</span>
+    <button onclick="setQ('variant','${keys[(i+1)%keys.length]}')">→</button>
+    ${seg('mode',['firstrun','settings'])} ${seg('data',['fresh','partial'])}
+    <span style="opacity:.6">step=${currentStep()}</span>`;
+}
+document.addEventListener('keydown',e=>{
+  const t=e.target; if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;
+  const keys=Object.keys(VARIANTS); const i=keys.indexOf(state.variant);
+  if(e.key==='ArrowRight'){state.variant=keys[(i+1)%keys.length];setQ('variant',state.variant);}
+  if(e.key==='ArrowLeft'){state.variant=keys[(i-1+keys.length)%keys.length];setQ('variant',state.variant);}
+});
+// setQ re-reads nothing from the URL except through render; keep state in sync
+const _setQ=setQ; setQ=function(k,v){ if(k==='variant')state.variant=v; if(k==='mode')state.mode=v; if(k==='state')state.data=v; if(k==='step')state.step=v; _setQ(k,v); };
+render();
+</script>
+</body>
+</html>
