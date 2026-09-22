@@ -3,13 +3,26 @@
   `class="dark"` is the fallback, not the answer. `index.css` declares
   `@custom-variant dark` against this class and defines the dark palette on
   `:root`, so a document that never runs a line of script still renders exactly
-  the app Artemis shipped as dark-only. The boot script in `<head>` replaces it
-  with the palette the user actually chose, before the first paint.
+  the app Artemis shipped as dark-only. The boot script further down replaces
+  it with the palette the user actually chose, before the first paint.
 
   Keeping the attribute is what makes that script's failure survivable: if it is
   ever blocked — a CSP whose hash has drifted is the realistic way — the app
   comes up dark and correct rather than unstyled, and the store's own pass at
   module load still corrects it a moment later.
+
+  One rule governs everything above the real head element, this comment
+  included: do not write the opening or closing head or body tag out, not even
+  inside backticks. Vite chooses where to inject by running a plain regular
+  expression over this file's raw text — first thing that looks like the tag
+  wins, comments and all — so a tag named in prose swallows whatever belongs
+  at that point. Named here, it swallows the dev client and the React Fast
+  Refresh preamble: neither runs, every component module then throws
+  "@vitejs/plugin-react can't detect preamble", and `pnpm dev` opens a blank
+  window. A packaged build is unaffected, because its stylesheet and script
+  tags are injected before the closing tag instead, and that is what makes this
+  a trap rather than a typo — the release looks right while every contributor's
+  dev server is dead. `index-html-injection.test.ts` fails if it drifts back.
 -->
 <html lang="en" class="dark">
   <head>
