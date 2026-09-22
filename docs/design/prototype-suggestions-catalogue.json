@@ -1,5 +1,5 @@
 {
-  "$comment": "PROTOTYPE, throwaway. Wayfinder ticket 20 on david/artemis (Forgejo). The suggestions catalogue Artemis would fetch at launch from its own repository, with the shipped copy as fallback. Two sections: skills (repositories a user can tick to track) and instructions (standing prompts a user can tick to own a copy of). The generated Setup prompts are NOT catalogue entries: Artemis renders them from live facts. Their draft texts live in prototype-suggestions-catalogue.html for review only.",
+  "$comment": "PROTOTYPE, throwaway. Wayfinder ticket 20 on david/artemis (Forgejo). The suggestions catalogue Artemis would fetch at launch from its own repository, with the shipped copy as fallback. Two sections: skills (repositories a user can follow, whole or skill by skill) and instructions (standing prompts a user can tick to own a copy of). Nothing is pre-ticked: the user chooses. The generated Setup prompts are NOT catalogue entries: Artemis renders them from live facts; their draft texts live in prototype-suggestions-catalogue.html for review only. Revision 2 after David's review on 2026-09-22.",
   "version": 1,
   "updated": "2026-09-22",
   "skills": [
@@ -10,19 +10,46 @@
       "pitch": "Test-driven development, code review, diagnosing bugs, domain modelling, prototypes, research and spec-to-tickets flows, from the author's own agents directory.",
       "license": { "spdx": "MIT", "declaredIn": "LICENSE", "holder": "Matt Pocock", "url": "https://github.com/mattpocock/skills/blob/main/LICENSE" },
       "skillCount": 18,
+      "skills": [
+        { "name": "ask-matt", "description": "Ask which skill or flow fits your situation. A router over the skills in this repo.", "invocation": "slash-only" },
+        { "name": "code-review", "description": "Review the changes since a fixed point along two axes: standards and spec.", "invocation": "model+slash" },
+        { "name": "codebase-design", "description": "Shared vocabulary for designing deep modules.", "invocation": "model+slash" },
+        { "name": "diagnosing-bugs", "description": "Diagnosis loop for hard bugs and performance regressions.", "invocation": "model+slash" },
+        { "name": "domain-modeling", "description": "Build and sharpen a project's domain model; CONTEXT.md and ADRs.", "invocation": "model+slash" },
+        { "name": "grill-with-docs", "description": "A relentless interview to sharpen a plan, writing ADRs and glossary as it goes.", "invocation": "slash-only" },
+        { "name": "implement", "description": "Implement a piece of work based on a spec or set of tickets.", "invocation": "slash-only" },
+        { "name": "improve-codebase-architecture", "description": "Scan a codebase for deepening opportunities and grill through one.", "invocation": "slash-only" },
+        { "name": "prototype", "description": "Build a throwaway prototype to answer a design question.", "invocation": "model+slash" },
+        { "name": "research", "description": "Investigate a question against primary sources and capture the findings in the repo.", "invocation": "model+slash" },
+        { "name": "resolving-merge-conflicts", "description": "Resolve an in-progress git merge or rebase conflict.", "invocation": "model+slash" },
+        { "name": "setup-matt-pocock-skills", "description": "Configure a repo for the engineering skills: tracker, labels, domain docs.", "invocation": "slash-only" },
+        { "name": "tdd", "description": "Test-driven development: red, green, refactor.", "invocation": "model+slash" },
+        { "name": "to-spec", "description": "Turn the current conversation into a spec on the issue tracker.", "invocation": "slash-only" },
+        { "name": "to-tickets", "description": "Break a plan or spec into tracer-bullet tickets with blocking edges.", "invocation": "slash-only" },
+        { "name": "triage", "description": "Move issues through triage roles and write agent-ready briefs.", "invocation": "slash-only" },
+        { "name": "wayfinder", "description": "Plan a huge chunk of work as a shared map of decision tickets.", "invocation": "slash-only" },
+        { "name": "wizard", "description": "Generate an interactive bash wizard for steps only a person can perform.", "invocation": "model+slash" }
+      ],
       "alwaysOn": [],
-      "preselected": true,
       "tags": ["engineering", "tdd", "code-review", "planning"]
     },
     {
       "url": "https://github.com/mattpocock/skills",
       "subdir": "skills/productivity",
       "title": "Matt Pocock — productivity",
-      "pitch": "Grilling a plan until it holds, writing for agents, handoffs and loops: the working habits around the engineering set.",
+      "pitch": "Grilling a plan until it holds, writing for agents, handoffs and questionnaires: the working habits around the engineering set.",
       "license": { "spdx": "MIT", "declaredIn": "LICENSE", "holder": "Matt Pocock", "url": "https://github.com/mattpocock/skills/blob/main/LICENSE" },
       "skillCount": 7,
+      "skills": [
+        { "name": "grill-me", "description": "A relentless interview to sharpen a plan or design.", "invocation": "slash-only" },
+        { "name": "grilling", "description": "Grill the user relentlessly about a plan, decision or idea.", "invocation": "model+slash" },
+        { "name": "handoff", "description": "Compact the conversation into a handoff document for another agent.", "invocation": "slash-only" },
+        { "name": "teach", "description": "Teach the user a new skill or concept, within this workspace.", "invocation": "slash-only" },
+        { "name": "to-questionnaire", "description": "Turn a decision you cannot fully answer into a questionnaire for someone else.", "invocation": "slash-only" },
+        { "name": "wait-what", "description": "Stop. That last message did not land: re-pitch it.", "invocation": "slash-only" },
+        { "name": "writing-for-agents", "description": "Writing documents for agents: skills, AGENTS.md, CLAUDE.md.", "invocation": "model+slash" }
+      ],
       "alwaysOn": [],
-      "preselected": true,
       "tags": ["productivity", "planning", "writing"]
     },
     {
@@ -32,30 +59,20 @@
       "pitch": "Removes the tells of machine-written prose: audits or rewrites text so it reads as a person wrote it.",
       "license": { "spdx": "MIT", "declaredIn": "SKILL.md", "holder": null, "url": "https://github.com/theclaymethod/unslop/blob/main/SKILL.md", "note": "Declared in SKILL.md and README; no LICENSE file and no named copyright holder. Upstream issue 9 asks for one." },
       "skillCount": 1,
+      "skills": [
+        { "name": "unslop", "description": "Remove AI writing patterns from prose: audit-only, or a two-pass rewrite.", "invocation": "model+slash" }
+      ],
       "alwaysOn": ["unslop"],
-      "alwaysOnPreselected": true,
       "alwaysOnApproxChars": 6100,
-      "preselected": true,
       "requires": "root-skill",
       "$requires": "The reader must first learn that a folder holding SKILL.md is itself one skill (research ticket 18). Until then this entry is shown but cannot be ticked.",
       "tags": ["writing", "prose"]
-    },
-    {
-      "url": "https://github.com/obra/superpowers",
-      "subdir": "skills",
-      "title": "Superpowers",
-      "pitch": "Fifteen general-purpose skills for planning, testing, debugging and reviewing, laid out one level down so the default folder works.",
-      "license": { "spdx": "MIT", "declaredIn": "LICENSE", "holder": "Jesse Vincent", "url": "https://github.com/obra/superpowers/blob/main/LICENSE" },
-      "skillCount": 15,
-      "alwaysOn": [],
-      "preselected": false,
-      "tags": ["engineering", "planning"]
     }
   ],
   "instructions": {
     "groups": [
       { "id": "setup", "title": "Setup", "blurb": "Written by Artemis from what you set up: your memory banks, your skills, your key manager. On by default once the feature is configured. Editable and removable like any other.", "generated": true },
-      { "id": "coding", "title": "Coding", "blurb": "Habits for work in a repository. Suggested to everyone who writes code with an agent." },
+      { "id": "coding", "title": "Coding", "blurb": "Habits for work in a repository. Read each and tick the ones you want." },
       { "id": "working", "title": "Working with me", "blurb": "How the agent talks to you and delegates. Personal, so read each before ticking." },
       { "id": "custom", "title": "Custom", "blurb": "Your own. Anything you write here is yours from the start." }
     ],
@@ -66,7 +83,6 @@
         "title": "Read code from a fresh checkout",
         "summary": "Pull or clone before you reference code, and say which commit you read.",
         "version": 1,
-        "preselected": true,
         "text": "Before you reference, quote or change code in a repository, make sure you are reading the current default branch: pull the latest from its remote, or clone it fresh into a scratch directory. Say which commit you read from. A stale checkout produces confident answers about code that no longer exists."
       },
       {
@@ -75,7 +91,6 @@
         "title": "Check a pull request is still open before pushing to it",
         "summary": "A merged or closed PR gets a new branch and a new PR, not more commits.",
         "version": 1,
-        "preselected": true,
         "text": "Before pushing further commits to a branch that has a pull request, check that the pull request is still open. If it has been merged or closed, do not push to that branch: start a new branch from the default branch and open a new pull request that links the old one."
       },
       {
@@ -84,7 +99,6 @@
         "title": "Read automated reviews after pushing",
         "summary": "Wait for CI and any review bots, then answer or fix every comment before asking a person.",
         "version": 1,
-        "preselected": true,
         "text": "After you push a pull request, wait for continuous integration and for any automated reviewers the repository runs (AI review bots, linters that comment). Read every comment they leave and either fix it or reply with why not, before you ask a person to review or before you merge. If the repository runs no automated reviewers, skip this. Never merge a pull request you were allowed to merge without checking for new automated review comments first."
       },
       {
@@ -93,7 +107,6 @@
         "title": "No attribution lines",
         "summary": "No co-author trailers, no generated-by footers, no signature in PR descriptions.",
         "version": 1,
-        "preselected": true,
         "text": "Do not add yourself as an author or co-author of commits, and do not append any generated-by, signed-off or attribution line to commit messages or pull request descriptions. The person you work for is the author of record."
       },
       {
@@ -102,7 +115,6 @@
         "title": "Ask with a recommended answer",
         "summary": "Interactive question prompts, researched first, best option first.",
         "version": 1,
-        "preselected": true,
         "text": "When you need a decision from me, ask through an interactive question prompt rather than in prose. Do enough research first to have a recommended answer, put that option first and mark it as recommended, and give each option a one-line consequence. Ask only what you cannot settle yourself."
       },
       {
@@ -111,7 +123,6 @@
         "title": "Which model runs your subagents",
         "summary": "A default model and effort for delegated work. Fill in the placeholders before enabling.",
         "version": 1,
-        "preselected": false,
         "placeholders": [
           { "key": "model", "label": "Model", "example": "Opus" },
           { "key": "effort", "label": "Effort", "example": "high" }

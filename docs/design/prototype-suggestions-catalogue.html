@@ -2,13 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>PROTOTYPE — Suggestions catalogue and the Setup prompts</title>
+<title>PROTOTYPE — Suggestions catalogue and the Setup prompts (rev 2)</title>
 <!--
-  PROTOTYPE, throwaway. Wayfinder ticket 20 on david/artemis (Forgejo).
+  PROTOTYPE, throwaway. Wayfinder ticket 20 on david/artemis (Forgejo). Revision 2 after David's review:
+  nothing pre-ticked, Superpowers dropped, repositories expand to per-skill checkboxes under a master box,
+  an add-a-repository row, a write-your-own-skill form, and a write-your-own instruction box.
   Renders prototype-suggestions-catalogue.json the way the wizard's Skills and Instructions steps would,
   and shows the three GENERATED Setup prompts (memory banks, skills, key manager) with sample facts.
-  Tabs: ?tab=skills | instructions | agent. The "agent" tab composes what a run would receive from the
-  ticked rows. Loads the JSON by fetch, so open it over http (raw.githack), not file://.
+  Tabs: ?tab=skills | instructions | agent. Loads the JSON by fetch, so open it over http (raw.githack), not file://.
 -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -31,31 +32,41 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 8px}h3{font-siz
 .tag.warn{border-color:color-mix(in srgb,var(--warn) 50%,transparent);color:var(--warn)}
 .tag.err{border-color:color-mix(in srgb,var(--err) 50%,transparent);color:var(--err)}
 .sw{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--ink-2)}
+.exp{font:inherit;font-size:12px;color:var(--accent-text);background:none;border:0;cursor:pointer;padding:0;margin-top:6px}
+.sub{margin-top:8px;border-left:2px solid var(--line);padding-left:12px;display:grid;gap:4px}
+.sub label{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--ink-2)}
+.sub label input{margin-top:2px}.sub code{color:var(--ink)}
 .group{margin-top:22px}.group .blurb{color:var(--ink-3);font-size:12px;margin:2px 0 8px}
 details{margin-top:6px}summary{cursor:pointer;color:var(--accent-text);font-size:12px}
 .text{white-space:pre-wrap;background:var(--well);border:var(--hair);border-radius:6px;padding:10px 12px;margin-top:6px;color:var(--ink-2)}
 .ph{display:inline-block;background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn);padding:0 4px;border-radius:3px}
 .agent{white-space:pre-wrap;background:var(--well);border:var(--hair);border-radius:8px;padding:14px 16px;color:var(--ink-2);font-size:12.5px}
 .count{font-size:12px;color:var(--ink-3);margin-top:8px}
-.note{border-left:2px solid var(--accent-text);padding:6px 12px;color:var(--ink-2);margin:10px 0}
+.form{display:grid;gap:8px;padding:12px 14px;border-top:var(--hair)}
+.form input,.form textarea{font:inherit;color:var(--ink);background:var(--well);border:var(--hair-in);border-radius:6px;padding:7px 9px;width:100%}
+.form textarea{min-height:90px;resize:vertical}
+.form .line{display:flex;gap:8px}.form .line input{flex:1}
+.btn{font:inherit;height:30px;padding:0 12px;border-radius:6px;border:var(--hair-in);background:var(--bar);color:var(--ink);cursor:pointer;font-weight:500;flex:none}
+.btn.primary{background:var(--accent);color:oklch(97% 0.014 264);border-color:transparent}
+.btn.sm{height:24px;padding:0 9px;font-size:12px}
+.own{margin-top:14px}
 </style>
 </head>
 <body><div class="wrap" id="root">Loading the catalogue…</div>
 <script>
 const q=new URLSearchParams(location.search); let tab=q.get('tab')||'skills';
-let CAT=null; const picked={skills:new Set(),alwaysOn:new Set(),instr:new Set()};
+let CAT=null;
+// picked.skills: entryKey -> Set of skill names. own: user-added repos and skills, in memory only.
+const picked={skills:new Map(),alwaysOn:new Set(),instr:new Set()};
+const own={repos:[],skills:[],instructions:[]};
+const expanded=new Set();
 
 // ---- sample facts the GENERATED Setup prompts render from (not catalogue data)
 const SAMPLE={
   banks:[
-    {slug:'david', kind:'personal', description:'David’s own memory: his machines, habits and projects.', remote:'github.com/david-systemtech/david-memory'},
-    {slug:'brandsolidate', kind:'team', description:'The Brandsolidate holding company and its brands. Use for anything about a brand’s Cloudflare, Shopify, ads or monitoring.', remote:'github.com/brandsolidate/memory',
+    {slug:'david', kind:'personal', description:'David’s own memory: his machines, habits and projects.'},
+    {slug:'brandsolidate', kind:'team', description:'The Brandsolidate holding company and its brands. Use for anything about a brand’s Cloudflare, Shopify, ads or monitoring.',
      entities:[{name:'Cool-Jams',aliases:['cool-jams.com','CJ']},{name:'Sir Waggingtons',aliases:['sirwaggingtons.com']},{name:'Bluebeards Original',aliases:['bluebeardsoriginal.com','Bluebeards']}], duplicateToPersonal:true}
-  ],
-  skills:[
-    {name:'tdd',desc:'Test-driven development. Use when the user wants to build features or fix bugs test-first.',alwaysOn:false,cmd:'/artemis-skills:tdd'},
-    {name:'grilling',desc:'Grill the user relentlessly about a plan, decision, or idea.',alwaysOn:false,cmd:'/artemis-skills:grilling'},
-    {name:'unslop',desc:'Remove AI writing patterns from prose: audit or rewrite.',alwaysOn:true,cmd:'/artemis-skills:unslop'},
   ],
   keyManager:{provider:'openbao',label:'Homelab OpenBao',address:'https://system-secrets.tail95de2.ts.net:8200',mounts:['personal','systemtech','brandsolidate'],cli:'bao'}
 };
@@ -71,7 +82,7 @@ This machine carries ${b.length} memory banks: git-backed collections of durable
 
 ${lines}
 
-**Where a fact goes.** \`${personal.slug}\` is ${'David'}'s personal bank and is never shared: preferences, their own machines, anything only they need. A team bank is read by everyone on that team.
+**Where a fact goes.** \`${personal.slug}\` is David's personal bank and is never shared: preferences, their own machines, anything only they need. A team bank is read by everyone on that team.
 ${routing}
 ${dup}
 Anything that fits no team bank goes to \`${personal.slug}\`. When unsure, the personal bank is the safe choice; a fact can be promoted to a team bank later, but a private fact in a team bank cannot be unread.
@@ -80,15 +91,23 @@ Keeping memory current is your job, not the user's. Never ask whether something 
 
 *(The rest is today's prompt unchanged: scope with applies_to, follow-ups are issues, strict validation, the bank's own BANK.md instructions, and the reference-not-instructions line.)*`;
 }
+function selectedSkills(){
+  const out=[];
+  for(const e of CAT.skills){ const set=picked.skills.get(key(e))||new Set(); for(const s of e.skills) if(set.has(s.name)) out.push({...s, alwaysOn:picked.alwaysOn.has(key(e)+'#'+s.name)}); }
+  for(const r of own.repos) for(const s of r.skills) if(r.selected.has(s.name)) out.push({...s,alwaysOn:false});
+  for(const s of own.skills) out.push({...s,alwaysOn:false});
+  return out;
+}
 function skillsPrompt(){
-  const s=SAMPLE.skills; const on=s.filter(x=>x.alwaysOn); const off=s.filter(x=>!x.alwaysOn);
+  const s=selectedSkills(); if(!s.length) return '## Your skills\n\n*(No skills selected; this prompt is not sent.)*';
+  const on=s.filter(x=>x.alwaysOn); const off=s.filter(x=>!x.alwaysOn);
   return `## Your skills
 
-Skills are procedures you can load when a task matches their description. ${s.length} are installed on this machine${on.length?`; ${on.length} of them (${on.map(x=>x.name).join(', ')}) ${on.length>1?'are':'is'} already applied to every conversation and need${on.length>1?'':'s'} no loading`:''}.
+Skills are procedures you can load when a task matches their description. ${s.length} ${s.length===1?'is':'are'} installed on this machine${on.length?`; ${on.map(x=>x.name).join(', ')} ${on.length>1?'are':'is'} already applied to every conversation and need${on.length>1?'':'s'} no loading`:''}.
 
 Load a skill when its description matches what you are about to do, before you start, not after. Loading is cheap; guessing a procedure a skill already holds is not. Load one with its command; the user can type the same command to ask for it.
 
-${off.map(x=>`- \`${x.cmd}\` — ${x.desc}`).join('\n')}
+${off.map(x=>`- \`/artemis-skills:${x.name}\` — ${x.description}`).join('\n')}
 
 If a skill's description does not match the task, do not load it. Never invent a skill name; the list above is complete for this machine.`;
 }
@@ -116,65 +135,98 @@ bao kv put -mount=<mount> <project>/<name> <key>=<value>
 Only after a real search fails may you tell the user the key is not in the key manager; say what you searched. The user can turn this instruction off in Settings › Instructions.`;
 }
 const GENERATED=[
-  {id:'setup.banks',title:'Use your memory banks',requires:'at least one bank set up and attached to this profile',render:bankPrompt, note:'Today’s built-in, extended: personal versus team, entities routing lines, and the duplicate-to-personal line. Everything after the house-style paragraph is unchanged and elided here.'},
-  {id:'setup.skills',title:'Use your skills',requires:'at least one skill installed',render:skillsPrompt, note:'New. Rendered per run from the installed skills. Always-on skills are named as already applied so the agent does not load them twice.'},
+  {id:'setup.banks',title:'Use your memory banks',requires:'at least one bank set up and attached to this profile',render:bankPrompt, note:'Today’s built-in, extended: personal versus team, entity routing lines, and the duplicate-to-personal line. Everything after the house-style paragraph is unchanged and elided here.'},
+  {id:'setup.skills',title:'Use your skills',requires:'at least one skill installed',render:skillsPrompt, note:'New. Rendered per run from the installed skills; here it follows what you tick on the Skills tab. Always-on skills are named as already applied so the agent does not load them twice.'},
   {id:'setup.keys',title:'Check the key manager before saying a key is missing',requires:'a key manager connected and its CLI installed',render:keyManagerPrompt, note:'New. Rendered from the connection: provider, address, mounts, CLI. The Doppler variant names doppler secrets --only-names and doppler secrets get NAME --plain, and forbids doppler run and secrets download.'},
 ];
 
+const key=e=>e.url+'#'+e.subdir;
 function licence(l){
   if(!l) return `<span class="tag err">no licence found</span>`;
   if(l.declaredIn==='LICENSE') return `<span class="tag">${l.spdx} · LICENSE file · ${l.holder}</span>`;
   return `<span class="tag warn">${l.spdx}, declared in ${l.declaredIn} only · no LICENSE file${l.holder?'':' · no named holder'}</span>`;
 }
+function repoRow(e, ownRepo){
+  const k=ownRepo?('own:'+e.url):key(e);
+  const set=ownRepo?e.selected:(picked.skills.get(k)||new Set());
+  const all=e.skills.length>0 && set.size===e.skills.length; const some=set.size>0 && !all;
+  const blocked=e.requires==='root-skill';
+  const open=expanded.has(k);
+  return `<div class="row">
+    <input type="checkbox" ${all?'checked':''} ${blocked?'disabled':''} data-ind="${some?1:0}" onchange="togAll('${k}')" title="${all?'Following all':some?'Following some':'Not following'}">
+    <div class="t"><b>${e.title}</b> <span class="faint">· ${set.size} of ${e.skillCount} skills</span>
+      <div class="pitch">${e.pitch||''}</div>
+      <div class="meta">${ownRepo?`<span class="tag">your repository</span>`:licence(e.license)} <span>${e.url.replace('https://github.com/','')}${e.subdir==='.'||!e.subdir?'':' / '+e.subdir}</span>${e.license?.note?`<span class="faint">${e.license.note}</span>`:''}</div>
+      ${blocked?`<div class="meta"><span class="tag err">needs the root-skill reader rule first</span><span class="faint">${e.$requires}</span></div>`:''}
+      <button class="exp" onclick="togExp('${k}')">${open?'Hide':'Choose'} skills ${open?'▴':'▾'}</button>
+      ${open?`<div class="sub">${e.skills.map(s=>`<label><input type="checkbox" ${set.has(s.name)?'checked':''} ${blocked?'disabled':''} onchange="togOne('${k}','${s.name}')"><span><code>${s.name}</code> <span class="faint">· ${s.invocation==='slash-only'?'typed only':'model may load it'}</span><br>${s.description}${(e.alwaysOn||[]).includes(s.name)?`<br><label class="sw" style="margin-top:4px"><input type="checkbox" ${picked.alwaysOn.has(k+'#'+s.name)?'checked':''} ${blocked||!set.has(s.name)?'disabled':''} onchange="togOn('${k}#${s.name}')"> Keep always on — appended to every conversation, about ${(e.alwaysOnApproxChars||0).toLocaleString()} characters (${Math.round((e.alwaysOnApproxChars||0)/4).toLocaleString()} tokens) per turn</label>`:''}</span></label>`).join('')}</div>`:''}
+      ${ownRepo?`<div class="meta"><button class="btn sm" onclick="rmRepo('${e.url}')">Stop following</button></div>`:''}
+    </div></div>`;
+}
 function renderSkills(){
-  const rows=CAT.skills.map((e,i)=>{
-    const blocked=e.requires==='root-skill';
-    const key=e.url+'#'+e.subdir;
-    return `<div class="row">
-      <input type="checkbox" ${picked.skills.has(key)?'checked':''} ${blocked?'disabled':''} onchange="tog('skills','${key}')">
-      <div class="t"><b>${e.title}</b> <span class="faint">· ${e.skillCount} skill${e.skillCount===1?'':'s'}</span>
-        <div class="pitch">${e.pitch}</div>
-        <div class="meta">${licence(e.license)} <span>${e.url.replace('https://github.com/','')}${e.subdir==='.'?'':' / '+e.subdir}</span>${e.license?.note?`<span class="faint">${e.license.note}</span>`:''}</div>
-        ${blocked?`<div class="meta"><span class="tag err">needs the root-skill reader rule first</span><span class="faint">${e.$requires}</span></div>`:''}
-        ${e.alwaysOn.length?`<label class="sw"><input type="checkbox" ${picked.alwaysOn.has(key)?'checked':''} ${blocked?'disabled':''} onchange="tog('alwaysOn','${key}')"> Keep <code>${e.alwaysOn.join(', ')}</code> always on — appended to every conversation, about ${(e.alwaysOnApproxChars||0).toLocaleString()} characters (${Math.round((e.alwaysOnApproxChars||0)/4).toLocaleString()} tokens) per turn</label>`:''}
-      </div></div>`;
-  }).join('');
-  return `<h1>Skills</h1><p class="lede">Procedures your agents can load. Tick a set to follow it: Artemis clones it, pulls it when it launches and before conversations, and offers each skill as a command. Untick to stop following. You can paste any repository URL below the list.</p>
-  <div class="list">${rows}</div>
-  <div class="count">${picked.skills.size} of ${CAT.skills.length} followed · ${picked.alwaysOn.size} always on</div>
-  <div class="note">Question for the review: the entries pre-ticked here follow the charting decision (Matt Pocock and unslop suggested, unslop always-on suggested with its cost shown). Superpowers is listed but unticked. Is that the right default set?</div>`;
+  const rows=CAT.skills.map(e=>repoRow(e,false)).join('');
+  const ownRows=own.repos.map(e=>repoRow(e,true)).join('');
+  const ownSkills=own.skills.map(s=>`<div class="row"><input type="checkbox" checked disabled><div class="t"><b><code>${s.name}</code></b> <span class="tag">written by you</span><div class="pitch">${s.description}</div></div></div>`).join('');
+  const total=selectedSkills().length;
+  return `<h1>Skills</h1><p class="lede">Procedures your agents can load. Follow a repository whole, or open it and choose the skills you want; Artemis clones it, pulls it when it launches and before conversations, and offers each chosen skill as a command. Nothing is chosen for you.</p>
+  <h2>Suggested</h2><div class="list">${rows}</div>
+  <h2>Your repositories</h2><div class="list">${ownRows||''}
+    <div class="form"><div class="faint">Follow any git repository that holds skills. Artemis clones it and lists what it finds; you choose from that list.</div>
+      <div class="line"><input id="repoUrl" placeholder="https://github.com/you/agent-skills"><input id="repoDir" placeholder="folder (default: skills)" style="max-width:200px"><button class="btn" onclick="addRepo()">Follow</button></div></div></div>
+  <h2>Your own skills</h2><div class="list">${ownSkills}
+    <div class="form"><div class="faint">A skill is a folder with a SKILL.md: a name, a one-line description that says when to use it, and the procedure. Write one here, or ask an agent to write it with you.</div>
+      <div class="line"><input id="skName" placeholder="name (kebab-case, e.g. release-checklist)"><input id="skDesc" placeholder="one line: what it does and when to use it"></div>
+      <textarea id="skBody" placeholder="The procedure, in markdown. Steps, rules, what to check."></textarea>
+      <div class="line"><button class="btn" onclick="addSkill()">Save skill</button><button class="btn" onclick="alert('PROTOTYPE: would open a conversation on your chosen account with a prompt to write this skill with you, then save it.')">Write it with an agent</button></div></div></div>
+  <div class="count">${total} skill${total===1?'':'s'} chosen · ${picked.alwaysOn.size} always on</div>`;
 }
 function renderInstructions(){
   const g=CAT.instructions.groups; const E=CAT.instructions.entries;
   const setup=`<div class="group"><h2>Setup <span class="tag">generated</span></h2><div class="blurb">${g[0].blurb}</div><div class="list">${GENERATED.map(x=>`<div class="row"><input type="checkbox" ${picked.instr.has(x.id)?'checked':''} onchange="tog('instr','${x.id}')"><div class="t"><b>${x.title}</b><div class="pitch">Appears once ${x.requires}. Rendered fresh for every conversation from what is configured.</div><div class="meta"><span class="faint">${x.note}</span></div><details><summary>Show the text Artemis would send (sample facts)</summary><div class="text">${esc(x.render())}</div></details></div></div>`).join('')}</div></div>`;
   const groups=g.slice(1).map(gr=>{
-    const rows=E.filter(e=>e.group===gr.id).map(e=>`<div class="row"><input type="checkbox" ${picked.instr.has(e.id)?'checked':''} onchange="tog('instr','${e.id}')"><div class="t"><b>${e.title}</b> <span class="faint">· v${e.version}</span><div class="pitch">${e.summary}</div>${e.placeholders?`<div class="meta"><span class="tag warn">fill in ${e.placeholders.map(p=>p.label.toLowerCase()).join(' and ')} before enabling</span></div>`:''}<details open><summary>Text you would own a copy of</summary><div class="text">${esc(e.text).replace(/\{(\w+)\}/g,'<span class="ph">{$1}</span>')}</div></details></div></div>`).join('');
-    return `<div class="group"><h2>${gr.title}</h2><div class="blurb">${gr.blurb}</div>${rows?`<div class="list">${rows}</div>`:`<div class="list"><div class="row"><div class="t faint">Nothing yet. Add your own with the button below the list.</div></div></div>`}</div>`;
+    const rows=E.filter(e=>e.group===gr.id).map(e=>`<div class="row"><input type="checkbox" ${picked.instr.has(e.id)?'checked':''} onchange="tog('instr','${e.id}')"><div class="t"><b>${e.title}</b> <span class="faint">· v${e.version}</span><div class="pitch">${e.summary}</div>${e.placeholders?`<div class="meta"><span class="tag warn">fill in ${e.placeholders.map(p=>p.label.toLowerCase()).join(' and ')} before enabling</span></div>`:''}<details><summary>Read the text you would own a copy of</summary><div class="text">${esc(e.text).replace(/\{(\w+)\}/g,'<span class="ph">{$1}</span>')}</div></details></div></div>`).join('');
+    const ownRows=gr.id==='custom'?own.instructions.map(e=>`<div class="row"><input type="checkbox" ${picked.instr.has(e.id)?'checked':''} onchange="tog('instr','${e.id}')"><div class="t"><b>${esc(e.title)}</b> <span class="tag">yours</span><details open><summary>Text</summary><div class="text">${esc(e.text)}</div></details></div></div>`).join(''):'';
+    const form=gr.id==='custom'?`<div class="form"><div class="faint">Write an instruction in your own words. It is sent with every conversation on accounts that can take it.</div><input id="ciTitle" placeholder="Title, e.g. Always run the tests before you say something works"><textarea id="ciText" placeholder="The instruction."></textarea><div class="line"><button class="btn" onclick="addInstr()">Add instruction</button></div></div>`:'';
+    return `<div class="group"><h2>${gr.title}</h2><div class="blurb">${gr.blurb}</div><div class="list">${rows}${ownRows}${form}</div></div>`;
   }).join('');
-  return `<h1>Instructions</h1><p class="lede">Standing instructions are sent with every conversation on accounts that can take them. Tick a suggestion to own an editable copy; if the suggestion changes later, the row will say so and offer the new text, never replace yours. Everything here can be edited or removed.</p>${setup}${groups}
+  return `<h1>Instructions</h1><p class="lede">Standing instructions are sent with every conversation on accounts that can take them. Tick a suggestion to own an editable copy; if the suggestion changes later, the row will say so and offer the new text, never replace yours. Nothing is ticked for you, and everything here can be edited or removed.</p>${setup}${groups}
   <div class="count">${picked.instr.size} instructions on</div>`;
 }
 function renderAgent(){
   const parts=[];
   for(const x of GENERATED) if(picked.instr.has(x.id)) parts.push(x.render());
   for(const e of CAT.instructions.entries) if(picked.instr.has(e.id)) parts.push(`## ${e.title}\n\n${e.text}`);
-  const on=[...picked.alwaysOn].map(k=>CAT.skills.find(e=>e.url+'#'+e.subdir===k)).filter(Boolean).flatMap(e=>e.alwaysOn);
+  for(const e of own.instructions) if(picked.instr.has(e.id)) parts.push(`## ${e.title}\n\n${e.text}`);
+  const on=[...picked.alwaysOn].map(k=>k.split('#').pop());
   if(on.length) parts.push(`## Always-on skills\n\n*(The full body of ${on.join(', ')} is appended here, about ${on.length*6100} characters.)*`);
   const text=parts.join('\n\n---\n\n');
   return `<h1>What a conversation receives</h1><p class="lede">The system-prompt append composed from the ticks on the other two tabs, in the order Artemis would send them: generated Setup prompts first, then the user's instructions, then always-on skill bodies. About ${text.length.toLocaleString()} characters (${Math.round(text.length/4).toLocaleString()} tokens).</p><div class="agent">${esc(text)||'<span class="faint">Nothing ticked.</span>'}</div>`;
 }
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')}
-function tog(set,key){ const s=picked[set]; s.has(key)?s.delete(key):s.add(key); render(); }
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+function entryFor(k){ return k.startsWith('own:')?own.repos.find(r=>'own:'+r.url===k):CAT.skills.find(e=>key(e)===k); }
+function setFor(k){ const e=entryFor(k); if(k.startsWith('own:')) return e.selected; if(!picked.skills.has(k)) picked.skills.set(k,new Set()); return picked.skills.get(k); }
+function togAll(k){ const e=entryFor(k); const set=setFor(k); if(set.size===e.skills.length){ set.clear(); for(const a of [...picked.alwaysOn]) if(a.startsWith(k+'#')) picked.alwaysOn.delete(a);} else for(const s of e.skills) set.add(s.name); render(); }
+function togOne(k,name){ const set=setFor(k); if(set.has(name)){set.delete(name);picked.alwaysOn.delete(k+'#'+name);} else set.add(name); render(); }
+function togOn(a){ picked.alwaysOn.has(a)?picked.alwaysOn.delete(a):picked.alwaysOn.add(a); render(); }
+function togExp(k){ expanded.has(k)?expanded.delete(k):expanded.add(k); render(); }
+function tog(set,k){ const s=picked[set]; s.has(k)?s.delete(k):s.add(k); render(); }
+function addRepo(){ const url=document.getElementById('repoUrl').value.trim(); const dir=document.getElementById('repoDir').value.trim()||'skills'; if(!url) return;
+  // PROTOTYPE: pretend the clone found three skills
+  own.repos.push({url,subdir:dir,title:url.replace(/^https?:\/\/(www\.)?github\.com\//,''),pitch:'Cloned. Found 3 skills in '+dir+'; choose the ones you want.',skillCount:3,selected:new Set(),skills:[{name:'example-one',description:'A skill found in your repository.',invocation:'model+slash'},{name:'example-two',description:'Another one.',invocation:'slash-only'},{name:'example-three',description:'And a third.',invocation:'model+slash'}]});
+  expanded.add('own:'+url); render(); }
+function rmRepo(url){ own.repos=own.repos.filter(r=>r.url!==url); render(); }
+function addSkill(){ const n=document.getElementById('skName').value.trim(); const d=document.getElementById('skDesc').value.trim(); const b=document.getElementById('skBody').value.trim(); if(!n||!d) return; own.skills.push({name:n,description:d,body:b,invocation:'model+slash'}); render(); }
+function addInstr(){ const t=document.getElementById('ciTitle').value.trim(); const x=document.getElementById('ciText').value.trim(); if(!t||!x) return; const id='custom.'+Date.now(); own.instructions.push({id,title:t,text:x}); picked.instr.add(id); render(); }
 function setTab(t){tab=t;const u=new URL(location);u.searchParams.set('tab',t);history.replaceState(null,'',u);render();}
 function render(){
   const body=tab==='skills'?renderSkills():tab==='instructions'?renderInstructions():renderAgent();
   document.getElementById('root').innerHTML=`<div class="tabs">${['skills','instructions','agent'].map(t=>`<button class="${t===tab?'on':''}" onclick="setTab('${t}')">${{skills:'Skills step',instructions:'Instructions step',agent:'What the agent receives'}[t]}</button>`).join('')}</div>${body}`;
+  for(const el of document.querySelectorAll('input[data-ind="1"]')) el.indeterminate=true;
 }
 fetch('prototype-suggestions-catalogue.json').then(r=>r.json()).then(c=>{
   CAT=c;
-  for(const e of c.skills){ const k=e.url+'#'+e.subdir; if(e.preselected&&e.requires!=='root-skill')picked.skills.add(k); if(e.alwaysOnPreselected&&e.requires!=='root-skill')picked.alwaysOn.add(k); }
+  // Only the generated Setup prompts start on: they exist because the feature is configured. Everything else is the user's choice.
   for(const x of GENERATED) picked.instr.add(x.id);
-  for(const e of c.instructions.entries) if(e.preselected) picked.instr.add(e.id);
   render();
 }).catch(err=>{document.getElementById('root').innerHTML=`<p>Could not load the JSON (${esc(String(err))}). Open this page over http, for example through raw.githack, not from a file:// path.</p>`;});
 </script>
