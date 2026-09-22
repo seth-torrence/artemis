@@ -1,0 +1,123 @@
+{
+  "$comment": "PROTOTYPE, throwaway. Wayfinder ticket 20 on david/artemis (Forgejo). The suggestions catalogue Artemis would fetch at launch from its own repository, with the shipped copy as fallback. Two sections: skills (repositories a user can tick to track) and instructions (standing prompts a user can tick to own a copy of). The generated Setup prompts are NOT catalogue entries: Artemis renders them from live facts. Their draft texts live in prototype-suggestions-catalogue.html for review only.",
+  "version": 1,
+  "updated": "2026-09-22",
+  "skills": [
+    {
+      "url": "https://github.com/mattpocock/skills",
+      "subdir": "skills/engineering",
+      "title": "Matt Pocock — engineering",
+      "pitch": "Test-driven development, code review, diagnosing bugs, domain modelling, prototypes, research and spec-to-tickets flows, from the author's own agents directory.",
+      "license": { "spdx": "MIT", "declaredIn": "LICENSE", "holder": "Matt Pocock", "url": "https://github.com/mattpocock/skills/blob/main/LICENSE" },
+      "skillCount": 18,
+      "alwaysOn": [],
+      "preselected": true,
+      "tags": ["engineering", "tdd", "code-review", "planning"]
+    },
+    {
+      "url": "https://github.com/mattpocock/skills",
+      "subdir": "skills/productivity",
+      "title": "Matt Pocock — productivity",
+      "pitch": "Grilling a plan until it holds, writing for agents, handoffs and loops: the working habits around the engineering set.",
+      "license": { "spdx": "MIT", "declaredIn": "LICENSE", "holder": "Matt Pocock", "url": "https://github.com/mattpocock/skills/blob/main/LICENSE" },
+      "skillCount": 7,
+      "alwaysOn": [],
+      "preselected": true,
+      "tags": ["productivity", "planning", "writing"]
+    },
+    {
+      "url": "https://github.com/theclaymethod/unslop",
+      "subdir": ".",
+      "title": "Unslop",
+      "pitch": "Removes the tells of machine-written prose: audits or rewrites text so it reads as a person wrote it.",
+      "license": { "spdx": "MIT", "declaredIn": "SKILL.md", "holder": null, "url": "https://github.com/theclaymethod/unslop/blob/main/SKILL.md", "note": "Declared in SKILL.md and README; no LICENSE file and no named copyright holder. Upstream issue 9 asks for one." },
+      "skillCount": 1,
+      "alwaysOn": ["unslop"],
+      "alwaysOnPreselected": true,
+      "alwaysOnApproxChars": 6100,
+      "preselected": true,
+      "requires": "root-skill",
+      "$requires": "The reader must first learn that a folder holding SKILL.md is itself one skill (research ticket 18). Until then this entry is shown but cannot be ticked.",
+      "tags": ["writing", "prose"]
+    },
+    {
+      "url": "https://github.com/obra/superpowers",
+      "subdir": "skills",
+      "title": "Superpowers",
+      "pitch": "Fifteen general-purpose skills for planning, testing, debugging and reviewing, laid out one level down so the default folder works.",
+      "license": { "spdx": "MIT", "declaredIn": "LICENSE", "holder": "Jesse Vincent", "url": "https://github.com/obra/superpowers/blob/main/LICENSE" },
+      "skillCount": 15,
+      "alwaysOn": [],
+      "preselected": false,
+      "tags": ["engineering", "planning"]
+    }
+  ],
+  "instructions": {
+    "groups": [
+      { "id": "setup", "title": "Setup", "blurb": "Written by Artemis from what you set up: your memory banks, your skills, your key manager. On by default once the feature is configured. Editable and removable like any other.", "generated": true },
+      { "id": "coding", "title": "Coding", "blurb": "Habits for work in a repository. Suggested to everyone who writes code with an agent." },
+      { "id": "working", "title": "Working with me", "blurb": "How the agent talks to you and delegates. Personal, so read each before ticking." },
+      { "id": "custom", "title": "Custom", "blurb": "Your own. Anything you write here is yours from the start." }
+    ],
+    "entries": [
+      {
+        "id": "coding.fresh-checkout",
+        "group": "coding",
+        "title": "Read code from a fresh checkout",
+        "summary": "Pull or clone before you reference code, and say which commit you read.",
+        "version": 1,
+        "preselected": true,
+        "text": "Before you reference, quote or change code in a repository, make sure you are reading the current default branch: pull the latest from its remote, or clone it fresh into a scratch directory. Say which commit you read from. A stale checkout produces confident answers about code that no longer exists."
+      },
+      {
+        "id": "coding.pr-still-open",
+        "group": "coding",
+        "title": "Check a pull request is still open before pushing to it",
+        "summary": "A merged or closed PR gets a new branch and a new PR, not more commits.",
+        "version": 1,
+        "preselected": true,
+        "text": "Before pushing further commits to a branch that has a pull request, check that the pull request is still open. If it has been merged or closed, do not push to that branch: start a new branch from the default branch and open a new pull request that links the old one."
+      },
+      {
+        "id": "coding.read-bot-reviews",
+        "group": "coding",
+        "title": "Read automated reviews after pushing",
+        "summary": "Wait for CI and any review bots, then answer or fix every comment before asking a person.",
+        "version": 1,
+        "preselected": true,
+        "text": "After you push a pull request, wait for continuous integration and for any automated reviewers the repository runs (AI review bots, linters that comment). Read every comment they leave and either fix it or reply with why not, before you ask a person to review or before you merge. If the repository runs no automated reviewers, skip this. Never merge a pull request you were allowed to merge without checking for new automated review comments first."
+      },
+      {
+        "id": "coding.no-attribution",
+        "group": "coding",
+        "title": "No attribution lines",
+        "summary": "No co-author trailers, no generated-by footers, no signature in PR descriptions.",
+        "version": 1,
+        "preselected": true,
+        "text": "Do not add yourself as an author or co-author of commits, and do not append any generated-by, signed-off or attribution line to commit messages or pull request descriptions. The person you work for is the author of record."
+      },
+      {
+        "id": "working.ask-with-a-recommendation",
+        "group": "working",
+        "title": "Ask with a recommended answer",
+        "summary": "Interactive question prompts, researched first, best option first.",
+        "version": 1,
+        "preselected": true,
+        "text": "When you need a decision from me, ask through an interactive question prompt rather than in prose. Do enough research first to have a recommended answer, put that option first and mark it as recommended, and give each option a one-line consequence. Ask only what you cannot settle yourself."
+      },
+      {
+        "id": "working.subagent-model",
+        "group": "working",
+        "title": "Which model runs your subagents",
+        "summary": "A default model and effort for delegated work. Fill in the placeholders before enabling.",
+        "version": 1,
+        "preselected": false,
+        "placeholders": [
+          { "key": "model", "label": "Model", "example": "Opus" },
+          { "key": "effort", "label": "Effort", "example": "high" }
+        ],
+        "text": "When you delegate work to subagents, run them on {model} at {effort} effort unless I say otherwise for a task. Name the model you used when you report what a subagent found."
+      }
+    ]
+  }
+}
