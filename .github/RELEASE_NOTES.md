@@ -1,6 +1,16 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.20.1
+
+Opus 5.5 is pickable.
+
+**Opus 5.5.** Artemis offers whatever the bundled CLI reports, and the CLI it bundled had never heard of Opus 5.5 — so a model your account already had could not be chosen here. The Opus row now reads Opus 5.5, at every effort level including max.
+
+**Update the server with the app:** a served conversation is offered the models the *server's* CLI reports, so Opus 5.5 appears on one of those once the server is on 2.20.1.
+
+For contributors: `pnpm dev` used to come up as a blank window, because Vite injects by regular expression over raw text and matched an HTML comment in `index.html` before the tag that comment described. Packaged builds were never affected. A test now runs Vite's own four injection patterns over every HTML entry and fails if the first match for any of them lands inside a comment.
+
 ## What's new in 2.20.0
 
 Any conversation can drive a browser you are signed in to, through an Artemis extension of our own. Also: a Chrome switch that reaches the CLI at last, a rewind that starts over, panes you can drag, and a message you sent mid-turn no longer vanishing on read now.
