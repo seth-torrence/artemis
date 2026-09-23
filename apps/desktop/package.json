@@ -24,7 +24,7 @@
     "icon:build": "sh build/icon-build.sh"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.258",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.280",
     "@fontsource-variable/archivo": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@rx-artemis/core": "workspace:*",
