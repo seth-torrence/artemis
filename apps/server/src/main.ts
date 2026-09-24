@@ -237,6 +237,12 @@ function serverBrowser(): ServerBrowser | undefined {
 }
 
 async function serve(): Promise<void> {
+  // Served runs share this process's PID namespace, and an agent cleaning up a
+  // test server it started (`pkill -f 'main.js serve'`, a /proc cmdline loop)
+  // matched `node /app/dist/main.js serve` too, SIGTERMed PID 1 and ended every
+  // live run on the machine. The title replaces the command line other
+  // processes see, so a pattern aimed at some other `main.js serve` misses us.
+  process.title = 'artemis-server';
   const dir = dataDir();
   await mkdir(dir, { recursive: true });
   let config = await loadConfig(dir);
