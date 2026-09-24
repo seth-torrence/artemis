@@ -237,6 +237,16 @@ function serverBrowser(): ServerBrowser | undefined {
 }
 
 async function serve(): Promise<void> {
+  // Served runs share this process's PID namespace, and an agent cleaning up a
+  // test server it started (`pkill -f 'main.js serve'`, a /proc cmdline loop)
+  // matched `node /app/dist/main.js serve` too, SIGTERMed PID 1 and ended every
+  // live run on the machine. The title replaces the command line other
+  // processes see, so a pattern aimed at some other `main.js serve` misses us.
+  // It avoids the words such cleanups reach for - artemis, server, node, serve
+  // - so `pkill -f artemis` from an agent working on this repo misses us too.
+  // The port is added once bound, so two servers on one box differ as well.
+  // Node's bootstrap still shows the old command line for a moment first.
+  process.title = 'run-host';
   const dir = dataDir();
   await mkdir(dir, { recursive: true });
   let config = await loadConfig(dir);
@@ -321,6 +331,9 @@ async function serve(): Promise<void> {
   // start pass makes up at most one appointment per routine missed while the
   // server was down.
   host.routines.start();
+  // Linux caps the title at the original argv's length: 28 bytes for the
+  // container's `node /app/dist/main.js serve`, which this fits.
+  process.title = `run-host :${String(bound)}`;
   process.stdout.write(`Artemis server listening on ${bindHost()}:${String(bound)} (data: ${dir})\n`);
 
   let closing = false;
