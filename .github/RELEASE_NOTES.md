@@ -1,6 +1,14 @@
 Internal build — unsigned, on purpose. Every artifact here is built on the
 machine it targets, and boots before it ships.
 
+## What's new in 2.20.2
+
+A served conversation no longer ends because an agent cleaned up after itself.
+
+**The server survives an agent's cleanup.** Served runs share a process space with the server, and the server's command line read `node /app/dist/main.js serve`. An agent that stopped a test server of its own with `pkill -f 'main.js serve'`, or with a loop over `/proc` matching those words, stopped the Artemis server too, and every open pane said the server no longer had its run. The server now names its process `run-host :<port>`, which none of those patterns match, `pkill -f artemis` included. To stop a test server you started, kill the PID you started it with.
+
+**Update the server.** The fix is in the server, so it applies once the server is on 2.20.2. Anything that found the server in `ps` by `main.js` should look for `run-host` now.
+
 ## What's new in 2.20.1
 
 Opus 5.5 is pickable.
